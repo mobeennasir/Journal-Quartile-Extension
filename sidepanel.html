@@ -87,12 +87,15 @@
           <tbody id="batch-tbody"></tbody>
         </table>
         <button id="batch-download" type="button" class="primary">Download results as CSV</button>
+        <button id="batch-mjl" type="button" class="ghost">Get WoS categories (free)</button>
       </div>
     </section>
 
     <!-- ============ JCR IMPORT ============ -->
     <section aria-labelledby="jcr-heading">
       <h2 id="jcr-heading">Import JCR data</h2>
+      <label class="toggle"><input id="auto-fetch" type="checkbox" checked> Auto-fetch free data</label>
+      <p id="free-data-status" class="status">WoS list: checking…<br>SJR: checking…</p>
       <p class="section-desc">JCR export file (CSV or Excel). Saved until the next JCR release. Export file only, no login.</p>
       <label for="jcr-year">Data year this export covers</label>
       <p class="hint">The year the numbers describe.</p>
@@ -124,6 +127,19 @@
 
       <h3>Import SJR data</h3>
       <p class="section-desc">Optional. Fallback only, always labelled NOT JCR.</p>
+      <div class="button-row">
+        <label for="sjr-year">Year</label>
+        <select id="sjr-year">
+          <option value="2025" selected>2025</option>
+          <option value="2024">2024</option>
+          <option value="2023">2023</option>
+          <option value="2022">2022</option>
+          <option value="2021">2021</option>
+          <option value="2020">2020</option>
+          <option value="2019">2019</option>
+        </select>
+        <button id="sjr-fetch" type="button" class="primary">Get free SJR data</button>
+      </div>
       <div class="batch-controls">
         <label class="file-label" for="sjr-file">Choose SJR file</label>
         <input id="sjr-file" type="file" accept=".csv" hidden>
@@ -135,7 +151,10 @@
       <p id="sjr-status" class="status" aria-live="polite">No SJR data imported yet.</p>
 
       <h3>Import WoS journal list</h3>
-      <p class="section-desc">Optional. Category W (SCIE/SSCI/AHCI) or X (ESCI).</p>
+      <p class="section-desc">Free. Checked automatically for each article. No login, no JCR.</p>
+      <div class="button-row">
+        <button id="mjl-fetch" type="button" class="primary">Get WoS category (free)</button>
+      </div>
       <div class="batch-controls">
         <label class="file-label" for="mjl-file">Choose WoS file</label>
         <input id="mjl-file" type="file" accept=".csv,.xlsx,.xls" hidden>
@@ -149,7 +168,7 @@
       <button id="clear-data" type="button" class="ghost danger">Clear all imported data</button>
     </section>
 
-    <footer class="foot">Sources: Crossref, OpenAlex fallback. Rankings only from imported JCR or labelled SJR data.</footer>
+    <footer class="foot">Sources: Crossref, OpenAlex fallback. WoS category and SJR quartile are free. JCR quartile and Impact Factor need an imported JCR file.</footer>
     <p id="storage-note" class="hint" hidden></p>
     <button id="open-tab" type="button" class="ghost">Open in a full tab</button>
   </main>

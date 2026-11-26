@@ -10,10 +10,13 @@
   "background": {
     "service_worker": "background.js"
   },
-  "description": "Phase 2: look up an article by DOI, article link or manual entry via Crossref (OpenAlex fallback), then show its journal quartile and Impact Factor for the publication year from JCR data you import, with a labelled SJR fallback and WoS category W/X. Batch upload of Excel/CSV article lists with CSV export.",
+  "description": "Look up an article by DOI, article link or manual entry via Crossref (OpenAlex fallback), then show its journal quartile and Impact Factor for the publication year from JCR data you import, with a labelled SJR fallback and WoS category W/X. Free WoS and SJR data are fetched automatically, once a year, and stored until the next list is published. Batch upload of Excel/CSV article lists with CSV export.",
   "host_permissions": [
     "https://api.crossref.org/*",
     "https://api.openalex.org/*",
+    "https://mjl.clarivate.com/*",
+    "https://www.scimagojr.com/*",
+    "https://scimagojr.com/*",
     "https://*.nature.com/*",
     "https://nature.com/*",
     "https://*.sciencedirect.com/*",
@@ -58,5 +61,5 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  "version": "0.3.0"
+  "version": "0.4.0"
 }

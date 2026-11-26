@@ -42,9 +42,14 @@ input {
 input:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18); }
 input:hover { border-color: #9fb0c0; }
 input::placeholder { color: #8a97a5; }
+/* Checkbox toggle (e.g. "Auto-fetch free data"): inline, not the
+   full-width text-input style. */
+.toggle { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; margin: 10px 0 0; }
+.toggle input { width: auto; padding: 0; accent-color: #0f766e; }
 #lookup {
   margin-top: 9px;
   width: 100%;
+  min-height: 42px;
   padding: 10px;
   font-size: 14px;
   font-weight: 600;
@@ -53,6 +58,7 @@ input::placeholder { color: #8a97a5; }
   border: none;
   border-radius: 8px;
   cursor: pointer;
+  box-shadow: 0 1px 3px rgba(18, 50, 79, 0.25);
 }
 #lookup:hover { background: #0b5e57; }
 #lookup:disabled { opacity: 0.65; cursor: wait; }
@@ -71,12 +77,15 @@ input::placeholder { color: #8a97a5; }
 }
 
 /* Result card */
+/* Result card: a soft shadow lifts it off the page so the
+   answer is the first thing the eye finds. */
 .result {
   margin-top: 12px;
   background: #fff;
   border: 1px solid #dbe4ec;
   border-radius: 10px;
   padding: 12px 13px;
+  box-shadow: 0 1px 4px rgba(18, 50, 79, 0.08);
 }
 .source {
   display: inline-block;
@@ -90,7 +99,7 @@ input::placeholder { color: #8a97a5; }
   margin-bottom: 10px;
 }
 .source.openalex { background: #fdf3d7; color: #7a5b00; }
-.result dl { margin: 0; display: grid; grid-template-columns: 104px 1fr; row-gap: 6px; column-gap: 10px; font-size: 13px; }
+.result dl { margin: 0; display: grid; grid-template-columns: 104px 1fr; row-gap: 8px; column-gap: 10px; font-size: 13px; }
 .result dt { font-weight: 600; color: #5b6b7a; font-size: 12px; padding-top: 1px; }
 .result dd { margin: 0; overflow-wrap: anywhere; }
 /* Hierarchy: title is the clear headline, journal second, the rest plain. */
@@ -102,6 +111,10 @@ input::placeholder { color: #8a97a5; }
 .foot { margin-top: 12px; color: #8a97a5; font-size: 11.5px; text-align: center; }
 
 /* ---------- Phase 2: sections, mode tabs, batch, imports ---------- */
+/* One thin divider between sections: the panel reads as three
+   clear groups (single article / batch / imports) instead of one
+   long run of controls. */
+main > section + section { border-top: 1px solid #e6ebf0; padding-top: 2px; }
 h2 { font-size: 15px; line-height: 1.3; margin: 22px 0 4px; color: #12324f; letter-spacing: -0.01em; }
 h2:first-of-type { margin-top: 14px; }
 h3 { font-size: 13.5px; margin: 18px 0 4px; color: #12324f; }
@@ -110,7 +123,7 @@ h3 { font-size: 13.5px; margin: 18px 0 4px; color: #12324f; }
 .mode-desc code { background: #eef2f5; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 .mode-tabs { display: flex; gap: 6px; margin-top: 10px; }
 .mode-tab {
-  flex: 1; padding: 8px 6px; font-size: 12.5px; font-weight: 600;
+  flex: 1; min-height: 40px; padding: 10px 6px; font-size: 12.5px; font-weight: 600;
   color: #0f766e; background: #fff; border: 1px solid #b9d6d2;
   border-radius: 8px; cursor: pointer;
 }
@@ -120,18 +133,32 @@ h3 { font-size: 13.5px; margin: 18px 0 4px; color: #12324f; }
 .two-col { display: flex; gap: 10px; }
 .two-col > div { flex: 1; min-width: 0; }
 .primary {
-  margin-top: 10px; width: 100%; padding: 10px; font-size: 14px; font-weight: 600;
+  margin-top: 10px; width: 100%; min-height: 42px; padding: 10px; font-size: 14px; font-weight: 600;
   color: #fff; background: #0f766e; border: none; border-radius: 8px; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(18, 50, 79, 0.25);
 }
 .primary:hover { background: #0b5e57; }
-.primary:disabled { opacity: 0.55; cursor: not-allowed; }
+.primary:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+/* The upload button is the main action of the batch section, so
+   it stands out: navy (the brand colour), taller, stronger
+   shadow. Every other primary button stays teal. */
+#batch-run {
+  background: #12324f;
+  min-height: 46px;
+  font-size: 15px;
+  box-shadow: 0 2px 6px rgba(18, 50, 79, 0.35);
+}
+#batch-run:hover { background: #0d2438; }
+#batch-run:disabled { opacity: 0.55; box-shadow: none; }
 select {
   width: 100%; padding: 9px 11px; font-size: 13.5px; color: #1b2a3a;
   background: #fff; border: 1px solid #c3cfda; border-radius: 8px; outline: none;
 }
 select:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18); }
+/* File-choose buttons: real buttons, same height and weight
+   everywhere, so every "Choose …" reads as one tap target. */
 .file-label {
-  display: inline-block; padding: 8px 14px; font-size: 13px; font-weight: 600;
+  display: inline-flex; align-items: center; min-height: 36px; padding: 8px 16px; font-size: 13px; font-weight: 600;
   color: #0f766e; background: #fff; border: 1px solid #b9d6d2;
   border-radius: 999px; cursor: pointer; margin: 0;
 }
@@ -148,6 +175,8 @@ select:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0
 .batch-table th, .batch-table td { border: 1px solid #dbe4ec; padding: 6px 8px; text-align: left; vertical-align: top; }
 .batch-table th { background: #eef2f5; color: #12324f; font-size: 12px; }
 .batch-table td { overflow-wrap: anywhere; }
+/* Zebra rows: a long results list stays scannable at a glance. */
+.batch-table tbody tr:nth-child(even) td { background: #f7f9fb; }
 #batch-download { margin-top: 10px; }
 .source.jcr { background: #e0f2ef; color: #0b5e57; }
 .source.sjr { background: #fdf3d7; color: #7a5b00; }
@@ -158,8 +187,9 @@ select:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0
 .ghost {
   display: block;
   margin: 8px auto 0;
-  padding: 6px 12px;
-  font-size: 12px;
+  min-height: 36px;
+  padding: 8px 14px;
+  font-size: 12.5px;
   font-weight: 600;
   color: #0f766e;
   background: transparent;

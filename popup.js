@@ -53,6 +53,15 @@ const mjlImportBtn = document.getElementById("mjl-import");
 const mjlStatusEl = document.getElementById("mjl-status");
 const clearDataBtn = document.getElementById("clear-data");
 const storageNoteEl = document.getElementById("storage-note");
+const autoFetchToggleEl = document.getElementById("auto-fetch");
+const freeDataStatusEl = document.getElementById("free-data-status");
+const sjrYearEl = document.getElementById("sjr-year");
+const sjrFetchBtn = document.getElementById("sjr-fetch");
+const mjlFetchBtn = document.getElementById("mjl-fetch");
+const batchMjlBtn = document.getElementById("batch-mjl");
+
+// Last article shown, for the "Get WoS category (free)" retry.
+let lastShown = null;
 
 // Show a short note when imported data cannot persist (IndexedDB
 // unavailable, e.g. private mode): lookups still work, but imports
@@ -245,8 +254,9 @@ function rankingRows(data, rank) {
   } else {
     rows.push(["JCR quartile (" + year + ")", "No JCR data for this year"]);
     rows.push(["Impact Factor — JCR (" + year + ")", "No JCR data for this year"]);
+    rows.push(["SJR quartile — fallback, NOT JCR (" + year + ")", "No SJR data for this year"]);
   }
-  rows.push(["WoS category", wos ? wos + (wos === "W" ? " — SCIE, SSCI or AHCI" : " — ESCI (Emerging)") : "Unknown — needs WoS / JCR data"]);
+  rows.push(["WoS category", wos ? wos + (wos === "W" ? " — SCIE, SSCI or AHCI" : " — ESCI (Emerging)") : "Unknown — checking free WoS list…"]);
   if (rank && rank.source !== "none" && rank.sourceFile) {
     rows.push(["Ranking data from", escapeHtml(rank.sourceFile)]);
   }
@@ -280,10 +290,91 @@ async function showResult(data, sourceName) {
     `<span class="${sourceClass}">Source: ${escapeHtml(sourceName)}</span> ` + rankBadge +
     "<dl>" + rows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join("") + "</dl>";
   resultEl.hidden = false;
+  lastShown = { data, rank: rankForExport };
   if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
     chrome.storage.local.set({ lastLookup: { input: inputEl.value, data, sourceName, rank: rankForExport } });
   }
+  // WoS category is free and needs no JCR: check it automatically
+  // from the public Master Journal List (background worker). The
+  // result row updates live when the answer comes back.
+  updateWosCategory(data, rankForExport);
   return rankForExport;
+}
+
+// ---------- Free WoS category (no JCR, no login) ----------
+// The background worker reads the public MJL search page for the
+// article's ISSN and returns W (SCIE/SSCI/AHCI) or X (ESCI).
+// Order: auto-fetch (yearly file, if it ever succeeds) first,
+// then this per-article check, then manual import, then unknown.
+function wosDdEl() {
+  if (!resultEl) return null;
+  const dts = resultEl.querySelectorAll("dt");
+  for (const dt of dts) {
+    if (dt.textContent === "WoS category") return dt.nextElementSibling;
+  }
+  return null;
+}
+
+function sendBackgroundMessage(message, timeoutMs) {
+  return new Promise((resolve) => {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+      resolve({ error: "no-background" });
+      return;
+    }
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; resolve({ error: "timeout" }); } }, timeoutMs || 25000);
+    try {
+      chrome.runtime.sendMessage(message, (res) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(res || { error: "no-answer" });
+      });
+    } catch (err) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ error: "network", detail: String(err && err.message || err) });
+    }
+  });
+}
+
+async function fetchMjlCategory(issns) {
+  return sendBackgroundMessage({ type: "fetchMjlCategory", issns: issns || [] }, 25000);
+}
+
+function wosCategoryText(category) {
+  return category === "W" ? "W — SCIE, SSCI or AHCI"
+    : category === "X" ? "X — ESCI (Emerging)" : "";
+}
+
+async function updateWosCategory(data, rank) {
+  if (!data || !data.issns || !data.issns.length) return;
+  if (rank && rank.wosCategory) return; // already known from JCR / MJL import
+  const dd = wosDdEl();
+  if (dd) dd.textContent = "Checking free WoS list…";
+  const res = await fetchMjlCategory(data.issns);
+  const ddNow = wosDdEl();
+  if (res && res.category) {
+    // Store it, so the next lookup for this journal is instant.
+    try {
+      const rows = data.issns.map((issn) => ({
+        issn, journal: data.journal || "", year: null, quartile: "",
+        jif: null, wosIndex: res.index || "", wosCategory: res.category,
+        category: "", sourceFile: "Master Journal List (automatic)", editionYear: null,
+      }));
+      await getStore().putMjl(rows, { fileName: "Master Journal List (automatic)", rows: rows.length, importedAt: new Date().toISOString(), expires: DATA.mjlExpiresAt(new Date().toISOString()) });
+    } catch (err) { /* storage failure: the displayed value still stands */ }
+    if (ddNow) ddNow.textContent = wosCategoryText(res.category);
+    if (lastShown && lastShown.data === data) lastShown.rank.wosCategory = res.category;
+    refreshImportStatus();
+    return;
+  }
+  if (ddNow) {
+    ddNow.textContent = res && res.notIndexed
+      ? "Not in the WoS list"
+      : "Unknown — WoS list could not be read";
+  }
 }
 
 function showError(message) {
@@ -610,6 +701,23 @@ if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
 }
 
 // ---------- File reading: CSV / XLSX / old .xls ----------
+// What each upload button takes. The picker's accept attribute
+// limits the choice, but "All files" can bypass it, so the code
+// checks the extension too (isAllowedFileType in shared.js) and
+// rejects anything else with a short plain error.
+const ARTICLE_FILE_TYPES = [".csv", ".xlsx", ".xls"]; // article list
+const JCR_FILE_TYPES = [".csv", ".xlsx", ".xls"];     // JCR import
+const SJR_FILE_TYPES = [".csv"];                      // SJR import
+const MJL_FILE_TYPES = [".csv", ".xlsx", ".xls"];     // WoS list import
+
+// "" when the file type is fine, else a short plain error.
+function wrongTypeMessage(file, allowed, what) {
+  if (!file || isAllowedFileType(file.name, allowed)) return "";
+  const list = allowed.length === 1 ? allowed[0]
+    : allowed.slice(0, -1).join(", ") + " or " + allowed[allowed.length - 1];
+  return `Use a ${list} file for ${what}.`;
+}
+
 async function readSpreadsheetFile(file) {
   const name = (file.name || "").toLowerCase();
   if (name.endsWith(".csv")) {
@@ -636,7 +744,7 @@ async function readSpreadsheetFile(file) {
     }
     throw new Error("This .xls file is an old binary Excel file, which the extension cannot read. In Excel, save it as .xlsx or .csv and import that instead.");
   }
-  throw new Error("Unsupported file type — use a .csv or .xlsx file.");
+  throw new Error("Unsupported file type — use a .csv, .xlsx or .xls file.");
 }
 
 function fileNameOf(input) {
@@ -645,39 +753,122 @@ function fileNameOf(input) {
 }
 
 // ---------- JCR / SJR / MJL import ----------
+function latestFile(files) {
+  return files && files.length ? files[files.length - 1] : null;
+}
+
+// The SJR year a stored file covers: recorded at import, or
+// read from an auto-fetch file name ("SJR 2025 (auto-fetch)").
+function sjrFileYear(file) {
+  if (!file) return null;
+  if (file.year) return file.year;
+  const m = String(file.fileName || "").match(/SJR\s+(\d{4})/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 function refreshImportStatus() {
   getStore().getMeta().then((meta) => {
-    const expiry = DATA.nextJcrExpiry(meta.importedAt || undefined);
+    const jcrFile = latestFile(meta.jcrFiles);
+    const jcrImportedAt = (jcrFile && jcrFile.importedAt) || meta.importedAt;
+    const expiry = DATA.nextJcrExpiry(jcrImportedAt || undefined);
     if (meta.jcrRows) {
       const editions = meta.jcrFiles.map((f) => `${f.fileName} (${f.editionYear || "year not set"}, ${f.rows} rows)`).join("; ");
-      jcrStatusEl.textContent = `JCR data: ${meta.jcrRows} rows. ${editions}. Uploaded ${meta.importedAt ? new Date(meta.importedAt).toLocaleDateString() : "—"}. Valid until the next JCR release (about ${expiry}).`;
+      const jcrLeft = jcrImportedAt ? DATA.monthsLeftText(DATA.sjrExpiresAt(jcrImportedAt)) : "";
+      jcrStatusEl.textContent = `JCR data: ${meta.jcrRows} rows. ${editions}. Uploaded ${jcrImportedAt ? new Date(jcrImportedAt).toLocaleDateString() : "—"}. Valid until the next JCR release (${expiry}${jcrLeft ? ", " + jcrLeft : ""}).`;
       jcrStatusEl.classList.remove("error");
     } else {
       jcrStatusEl.textContent = "No JCR data imported yet.";
     }
-    if (meta.sjrRows) {
+    const sjrFile = latestFile(meta.sjrFiles);
+    if (meta.sjrRows && sjrFile && sjrFile.importedAt) {
+      sjrStatusEl.textContent = `SJR data: ${meta.sjrRows} rows (fallback only, never shown as JCR). ${DATA.validUntilText(sjrFile.importedAt, "sjr")}.`;
+    } else if (meta.sjrRows) {
       sjrStatusEl.textContent = `SJR data: ${meta.sjrRows} rows (fallback only, never shown as JCR).`;
     } else {
       sjrStatusEl.textContent = "No SJR data imported yet.";
     }
-    if (meta.mjlRows) {
+    const mjlFile = latestFile(meta.mjlFiles);
+    if (meta.mjlRows && mjlFile && mjlFile.importedAt) {
+      mjlStatusEl.textContent = `WoS list: ${meta.mjlRows} journals stored. ${DATA.validUntilText(mjlFile.importedAt, "mjl")}.`;
+    } else if (meta.mjlRows) {
       mjlStatusEl.textContent = `WoS list: ${meta.mjlRows} journals stored.`;
     } else {
       mjlStatusEl.textContent = "No WoS list imported yet.";
     }
+    renderFreeDataStatus(meta);
   }).catch(() => { /* status stays as the default text */ });
+}
+
+// Short status lines for the free data: what worked, which path,
+// and how long it lasts. One line per source.
+function renderFreeDataStatus(meta) {
+  if (!freeDataStatusEl) return;
+  const setLines = (auto) => {
+    const sjrFile = latestFile(meta.sjrFiles);
+    const mjlFile = latestFile(meta.mjlFiles);
+    let sjrLine, mjlLine;
+    if (meta.sjrRows && sjrFile && sjrFile.importedAt) {
+      const year = sjrFileYear(sjrFile);
+      sjrLine = `SJR: ready${year ? ", " + year : ""}. ${DATA.validUntilText(sjrFile.importedAt, "sjr")}.`;
+    } else if (auto && auto.sjr && auto.sjr.state === "blocked") {
+      sjrLine = "SJR: auto-fetch blocked (bot check). Tap Get free SJR data.";
+    } else if (auto && auto.sjr && auto.sjr.state === "failed") {
+      sjrLine = "SJR: auto-fetch failed. Tap Get free SJR data.";
+    } else {
+      sjrLine = "SJR: checking…";
+    }
+    if (meta.mjlRows && mjlFile && mjlFile.importedAt) {
+      mjlLine = `WoS list: ready. ${DATA.validUntilText(mjlFile.importedAt, "mjl")}.`;
+    } else if (auto && auto.mjl && auto.mjl.state === "login") {
+      mjlLine = "WoS list: file needs MJL login. Category checked per article (free).";
+    } else if (auto && auto.mjl && auto.mjl.state === "failed") {
+      mjlLine = "WoS list: auto-fetch failed. Category checked per article (free).";
+    } else {
+      mjlLine = "WoS list: checking…";
+    }
+    freeDataStatusEl.innerHTML = escapeHtml(mjlLine) + "<br>" + escapeHtml(sjrLine);
+  };
+  if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get("autoFreeData", (r) => setLines(r && r.autoFreeData));
+  } else {
+    setLines(null);
+  }
 }
 
 jcrFileEl.addEventListener("change", () => {
   jcrFileNameEl.textContent = fileNameOf(jcrFileEl) || "No file chosen.";
+  const bad = Array.from(jcrFileEl.files || []).find((f) => wrongTypeMessage(f, JCR_FILE_TYPES, "the JCR import"));
+  if (bad) {
+    jcrStatusEl.textContent = wrongTypeMessage(bad, JCR_FILE_TYPES, "the JCR import");
+    jcrStatusEl.classList.add("error");
+    jcrImportBtn.disabled = true;
+    return;
+  }
+  jcrStatusEl.classList.remove("error");
   jcrImportBtn.disabled = !jcrFileEl.files.length;
 });
 sjrFileEl.addEventListener("change", () => {
   sjrFileNameEl.textContent = fileNameOf(sjrFileEl) || "No file chosen.";
+  const bad = Array.from(sjrFileEl.files || []).find((f) => wrongTypeMessage(f, SJR_FILE_TYPES, "the SJR import"));
+  if (bad) {
+    sjrStatusEl.textContent = wrongTypeMessage(bad, SJR_FILE_TYPES, "the SJR import");
+    sjrStatusEl.classList.add("error");
+    sjrImportBtn.disabled = true;
+    return;
+  }
+  sjrStatusEl.classList.remove("error");
   sjrImportBtn.disabled = !sjrFileEl.files.length;
 });
 mjlFileEl.addEventListener("change", () => {
   mjlFileNameEl.textContent = fileNameOf(mjlFileEl) || "No file chosen.";
+  const bad = Array.from(mjlFileEl.files || []).find((f) => wrongTypeMessage(f, MJL_FILE_TYPES, "the WoS list import"));
+  if (bad) {
+    mjlStatusEl.textContent = wrongTypeMessage(bad, MJL_FILE_TYPES, "the WoS list import");
+    mjlStatusEl.classList.add("error");
+    mjlImportBtn.disabled = true;
+    return;
+  }
+  mjlStatusEl.classList.remove("error");
   mjlImportBtn.disabled = !mjlFileEl.files.length;
 });
 
@@ -694,7 +885,8 @@ jcrImportBtn.addEventListener("click", async () => {
       const text = await readSpreadsheetFile(file);
       const parsed = DATA.parseJcrText(text, { editionYear, fileName: file.name });
       if (parsed.rows.length) {
-        await getStore().putJcr(parsed.rows, { fileName: file.name, editionYear, rows: parsed.rows.length, importedAt: new Date().toISOString() });
+        const importedAt = new Date().toISOString();
+        await getStore().putJcr(parsed.rows, { fileName: file.name, editionYear, rows: parsed.rows.length, importedAt, expires: DATA.sjrExpiresAt(importedAt) });
         total += parsed.rows.length;
       }
       skipped += parsed.skipped;
@@ -717,6 +909,13 @@ sjrImportBtn.addEventListener("click", async () => {
   const files = Array.from(sjrFileEl.files || []);
   if (!files.length) return;
   sjrImportBtn.disabled = true;
+  const bad = files.find((f) => wrongTypeMessage(f, SJR_FILE_TYPES, "the SJR import"));
+  if (bad) {
+    sjrStatusEl.textContent = wrongTypeMessage(bad, SJR_FILE_TYPES, "the SJR import");
+    sjrStatusEl.classList.add("error");
+    sjrImportBtn.disabled = false;
+    return;
+  }
   sjrStatusEl.textContent = "Importing SJR file…";
   try {
     let total = 0, skipped = 0;
@@ -725,7 +924,14 @@ sjrImportBtn.addEventListener("click", async () => {
       const text = await file.text();
       const parsed = DATA.parseSjrText(text, { fileName: file.name });
       if (parsed.rows.length) {
-        await getStore().putSjr(parsed.rows, { fileName: file.name, rows: parsed.rows.length, importedAt: new Date().toISOString() });
+        const importedAt = new Date().toISOString();
+        // The year this file covers (most common row year) and its
+        // expiry (next June release): stored until expiry, reused
+        // for every lookup until then, like the auto-fetch path.
+        const yearCounts = {};
+        parsed.rows.forEach((r) => { if (r.year) yearCounts[r.year] = (yearCounts[r.year] || 0) + 1; });
+        const topYear = Object.keys(yearCounts).sort((a, b) => yearCounts[b] - yearCounts[a])[0];
+        await getStore().putSjr(parsed.rows, { fileName: file.name, year: topYear ? parseInt(topYear, 10) : null, rows: parsed.rows.length, importedAt, expires: DATA.sjrExpiresAt(importedAt) });
         total += parsed.rows.length;
       }
       skipped += parsed.skipped;
@@ -756,7 +962,8 @@ mjlImportBtn.addEventListener("click", async () => {
       const text = await readSpreadsheetFile(file);
       const parsed = DATA.parseMJLText(text, { fileName: file.name });
       if (parsed.rows.length) {
-        await getStore().putMjl(parsed.rows, { fileName: file.name, rows: parsed.rows.length, importedAt: new Date().toISOString() });
+        const importedAt = new Date().toISOString();
+        await getStore().putMjl(parsed.rows, { fileName: file.name, rows: parsed.rows.length, importedAt, expires: DATA.mjlExpiresAt(importedAt) });
         total += parsed.rows.length;
       }
       skipped += parsed.skipped;
@@ -774,6 +981,103 @@ mjlImportBtn.addEventListener("click", async () => {
     refreshImportStatus();
   }
 });
+
+// ---------- Auto-fetch free data (on by default) ----------
+// First run, and once a year after, the background worker fetches
+// the free SJR CSV and the WoS list itself and stores them until
+// they expire. No user action, no server. Turning it off stops
+// future fetches; already stored data stays until expiry.
+function loadAutoFetchToggle() {
+  if (!autoFetchToggleEl) return;
+  if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+  chrome.storage.local.get(["autoFetchFreeData", "autoFreeData", "autoFetchFreeDataLastRun"], (r) => {
+    autoFetchToggleEl.checked = !r || r.autoFetchFreeData === undefined ? true : !!r.autoFetchFreeData;
+    // First run: nothing fetched yet — trigger it now so the
+    // status lines fill in without waiting for a worker wake.
+    if (autoFetchToggleEl.checked && r && !r.autoFreeData && !r.autoFetchFreeDataLastRun) {
+      sendBackgroundMessage({ type: "autoFetchFreeData" }, 120000).then(() => refreshImportStatus());
+    }
+  });
+}
+if (autoFetchToggleEl) {
+  autoFetchToggleEl.addEventListener("change", () => {
+    const enabled = autoFetchToggleEl.checked;
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+    chrome.storage.local.set({ autoFetchFreeData: enabled }, () => {
+      if (enabled) {
+        if (freeDataStatusEl) freeDataStatusEl.innerHTML = "WoS list: checking…<br>SJR: checking…";
+        sendBackgroundMessage({ type: "autoFetchFreeData" }, 120000).then(() => refreshImportStatus());
+      }
+      refreshImportStatus();
+    });
+  });
+  loadAutoFetchToggle();
+}
+
+// "Get free SJR data": auto-fetch first (background fetch), then
+// one-click download in the user's browser (imported
+// automatically), then manual import as last resort. Data from
+// any path is stored until expiry and reused for every lookup —
+// never used once and discarded. Re-fetch happens only after
+// expiry.
+if (sjrFetchBtn) {
+  sjrFetchBtn.addEventListener("click", async () => {
+    const year = parseInt(sjrYearEl.value, 10) || new Date().getFullYear() - 1;
+    sjrFetchBtn.disabled = true;
+    try {
+      const meta = await getStore().getMeta();
+      const latest = latestFile(meta.sjrFiles);
+      const latestYear = sjrFileYear(latest);
+      if (latest && latest.importedAt && !DATA.isExpired(latest.importedAt, "sjr")
+          && (!latestYear || latestYear === year)) {
+        sjrStatusEl.textContent = `SJR ${year} data already stored. ${DATA.validUntilText(latest.importedAt, "sjr")}.`;
+        sjrStatusEl.classList.remove("error");
+        return;
+      }
+    } catch (err) { /* fall through and try the fetch */ }
+    try {
+      sjrStatusEl.textContent = `Getting free SJR data for ${year}…`;
+      let res = await sendBackgroundMessage({ type: "fetchSjrExport", year }, 90000);
+      if (res && res.rows) {
+        sjrStatusEl.textContent = `SJR data: ${res.rows} rows for ${year}, saved. ${DATA.validUntilText(new Date().toISOString(), "sjr")}.`;
+        sjrStatusEl.classList.remove("error");
+        refreshImportStatus();
+        return;
+      }
+      if (res && (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
+        sjrStatusEl.textContent = "Direct download blocked. Trying the download in your browser…";
+        res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year }, 90000);
+        if (res && res.rows) {
+          sjrStatusEl.textContent = `SJR data: ${res.rows} rows for ${year}, saved from the browser download. ${DATA.validUntilText(new Date().toISOString(), "sjr")}.`;
+          sjrStatusEl.classList.remove("error");
+          refreshImportStatus();
+          return;
+        }
+      }
+      sjrStatusEl.textContent = "SJR blocked the download (bot check). Download the CSV from scimagojr.com yourself and use Import SJR file below.";
+      sjrStatusEl.classList.add("error");
+      refreshImportStatus();
+    } finally {
+      sjrFetchBtn.disabled = false;
+    }
+  });
+}
+
+// "Get WoS category (free)": re-check the category for the
+// article shown above, from the free public MJL search. The
+// answer is stored, so the next lookup for the journal is instant.
+if (mjlFetchBtn) {
+  mjlFetchBtn.addEventListener("click", async () => {
+    if (!lastShown || !lastShown.data || !lastShown.data.issns || !lastShown.data.issns.length) {
+      mjlStatusEl.textContent = "Look up an article first, then tap this button.";
+      return;
+    }
+    mjlStatusEl.textContent = "Checking the free WoS list…";
+    await updateWosCategory(lastShown.data, lastShown.rank);
+    mjlStatusEl.textContent = "WoS category checked for the article above.";
+    refreshImportStatus();
+  });
+}
 
 clearDataBtn.addEventListener("click", async () => {
   if (!window.confirm("Clear all imported data? This deletes every imported JCR, SJR and WoS row from the extension.")) return;
@@ -798,6 +1102,13 @@ batchFileEl.addEventListener("change", async () => {
   batchRunBtn.disabled = !file;
   batchFileRows = null;
   if (!file) return;
+  const typeError = wrongTypeMessage(file, ARTICLE_FILE_TYPES, "the article list");
+  if (typeError) {
+    batchStatusEl.textContent = typeError;
+    batchStatusEl.classList.add("error");
+    batchRunBtn.disabled = true;
+    return;
+  }
   try {
     const text = await readSpreadsheetFile(file);
     const parsed = DATA.parseArticleListText(text);
@@ -950,6 +1261,47 @@ batchDownloadBtn.addEventListener("click", () => {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
+
+// "Get WoS categories (free)": check the category for every
+// batch row that has an ISSN and no category yet, from the free
+// public MJL search. Answers are stored until expiry, so the
+// next batch for the same journals is instant.
+if (batchMjlBtn) {
+  batchMjlBtn.addEventListener("click", async () => {
+    if (!batchResults.length) return;
+    batchMjlBtn.disabled = true;
+    let checked = 0, found = 0;
+    try {
+      for (let i = 0; i < batchResults.length; i++) {
+        const r = batchResults[i];
+        if (!r.issns || !r.issns.length || (r.rank && r.rank.wosCategory)) continue;
+        const res = await fetchMjlCategory(r.issns);
+        checked++;
+        if (res && res.category) {
+          found++;
+          r.rank = r.rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
+          r.rank.wosCategory = res.category;
+          try {
+            const importedAt = new Date().toISOString();
+            const rows = r.issns.map((issn) => ({
+              issn, journal: r.journal || "", year: null, quartile: "",
+              jif: null, wosIndex: res.index || "", wosCategory: res.category,
+              category: "", sourceFile: "Master Journal List (automatic)", editionYear: null,
+            }));
+            await getStore().putMjl(rows, { fileName: "Master Journal List (automatic)", rows: rows.length, importedAt, expires: DATA.mjlExpiresAt(importedAt) });
+          } catch (err) { /* the displayed value still stands */ }
+          const tr = batchTbodyEl.children[i];
+          if (tr && tr.children[5]) tr.children[5].textContent = res.category;
+        }
+        await sleep(300); // polite pacing for the MJL search
+      }
+      batchStatusEl.textContent = `WoS categories: ${found} found of ${checked} checked.`;
+    } finally {
+      batchMjlBtn.disabled = false;
+      refreshImportStatus();
+    }
+  });
+}
 
 // Show the current import status when the panel opens.
 refreshImportStatus();

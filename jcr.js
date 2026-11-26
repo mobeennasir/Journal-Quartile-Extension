@@ -749,6 +749,81 @@
     return "June " + year;
   }
 
+  // ---------- Free-data expiry (WoS list / SJR) ----------
+  // Stored free data is reused until the next list is published,
+  // about a year, and only re-fetched or re-downloaded after
+  // expiry — never discarded after one use. SJR releases each
+  // June, so SJR data expires at the next June 1 after import.
+  // The WoS Master Journal List is annual, so it expires 12
+  // months after import. Expiry is derived from the stored
+  // download date, so every import path (auto-fetch, one-click
+  // download, manual import) gets the same rule, and the UI can
+  // show the remaining time in one short line.
+  var MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"];
+
+  function nextJuneDate(fromDate) {
+    const d = fromDate ? new Date(fromDate) : new Date();
+    const year = d.getMonth() < 5 ? d.getFullYear() : d.getFullYear() + 1;
+    return new Date(Date.UTC(year, 5, 1));
+  }
+
+  // ISO date string for when SJR data imported at importedAt
+  // expires (next June 1).
+  function sjrExpiresAt(importedAt) {
+    return nextJuneDate(importedAt).toISOString();
+  }
+
+  // ISO date string for when WoS list data imported at
+  // importedAt expires (12 months after import).
+  function mjlExpiresAt(importedAt) {
+    const d = importedAt ? new Date(importedAt) : new Date();
+    return new Date(Date.UTC(d.getUTCFullYear() + 1, d.getUTCMonth(), d.getUTCDate())).toISOString();
+  }
+
+  // "June 2027" / "Nov 2027" for an expiry ISO date.
+  function expiryMonthLabel(expiresIso) {
+    const d = new Date(expiresIso);
+    if (isNaN(d.getTime())) return "";
+    return MONTH_NAMES[d.getUTCMonth()] + " " + d.getUTCFullYear();
+  }
+
+  // Whole months from fromDate until expiresIso. Negative when
+  // already past expiry. Coarse (month granularity), which is
+  // what the UI shows.
+  function monthsLeft(expiresIso, fromDate) {
+    const e = new Date(expiresIso);
+    const f = fromDate ? new Date(fromDate) : new Date();
+    if (isNaN(e.getTime()) || isNaN(f.getTime())) return null;
+    if (e.getTime() < f.getTime()) return -1;
+    return (e.getUTCFullYear() - f.getUTCFullYear()) * 12
+      + (e.getUTCMonth() - f.getUTCMonth());
+  }
+
+  // "7 months left" / "1 month left" / "expires this month" /
+  // "expired".
+  function monthsLeftText(expiresIso, fromDate) {
+    const m = monthsLeft(expiresIso, fromDate);
+    if (m === null) return "";
+    if (m < 0) return "expired";
+    if (m === 0) return "expires this month";
+    if (m === 1) return "1 month left";
+    return m + " months left";
+  }
+
+  // One short line: "Valid until June 2027, 7 months left".
+  // kind: "sjr" (also used for JCR, same June rule) or "mjl".
+  function validUntilText(importedAt, kind, fromDate) {
+    const iso = kind === "mjl" ? mjlExpiresAt(importedAt) : sjrExpiresAt(importedAt);
+    return "Valid until " + expiryMonthLabel(iso) + ", " + monthsLeftText(iso, fromDate);
+  }
+
+  function isExpired(importedAt, kind, fromDate) {
+    const iso = kind === "mjl" ? mjlExpiresAt(importedAt) : sjrExpiresAt(importedAt);
+    const m = monthsLeft(iso, fromDate);
+    return m !== null && m < 0;
+  }
+
   const api = {
     normaliseIssn: normaliseIssn, formatIssn: formatIssn,
     parseIssnList: parseIssnList,
@@ -761,6 +836,10 @@
     lookupRankSync: lookupRankSync,
     RESULTS_HEADER: RESULTS_HEADER, resultsToCsv: resultsToCsv,
     nextJcrExpiry: nextJcrExpiry,
+    sjrExpiresAt: sjrExpiresAt, mjlExpiresAt: mjlExpiresAt,
+    expiryMonthLabel: expiryMonthLabel,
+    monthsLeft: monthsLeft, monthsLeftText: monthsLeftText,
+    validUntilText: validUntilText, isExpired: isExpired,
   };
 
   if (typeof module !== "undefined" && module.exports) {

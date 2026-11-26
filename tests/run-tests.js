@@ -396,6 +396,176 @@ async function main() {
   check("sidepanel loads net.js", panelHtml.indexOf('<script src="net.js"></script>') !== -1);
   check("sidepanel has a storage-fallback note element", panelHtml.indexOf('id="storage-note"') !== -1);
 
+  console.log("== 21. Free data without JCR: freedata.js pure functions (27 Nov 2026) ==");
+  // WoS category and the SJR fallback come from free sources, not
+  // JCR. These are pure URL builders / parsers — no live fetch
+  // here, because the MJL search times out and SJR is
+  // Cloudflare-blocked from this VM.
+  const FREE = require("../freedata.js");
+  check("mjlSearchUrl hyphenates the ISSN", FREE.mjlSearchUrl("14712180") === "https://mjl.clarivate.com/search-results?issn=1471-2180");
+  check("mjlSearchUrl accepts a hyphenated ISSN", FREE.mjlSearchUrl("1471-2180") === "https://mjl.clarivate.com/search-results?issn=1471-2180");
+  check("mjlSearchUrl: Journal of Membrane Science ISSN", FREE.mjlSearchUrl("03767388") === "https://mjl.clarivate.com/search-results?issn=0376-7388");
+  const mjlEsci = '<html><body><p>Found 1 results</p><div>Web of Science Core Collection: Emerging Sources Citation Index</div></body></html>';
+  const parsedEsci = FREE.parseMjlSearchHtml(mjlEsci);
+  check("MJL search: ESCI parses to X", parsedEsci.index === "ESCI" && parsedEsci.category === "X" && parsedEsci.found === "result", JSON.stringify(parsedEsci));
+  const mjlScie = '<div>Web of Science Core Collection: Science Citation Index Expanded</div><p>Found 1 results</p>';
+  const parsedScie = FREE.parseMjlSearchHtml(mjlScie);
+  check("MJL search: SCIE parses to W", parsedScie.index === "SCIE" && parsedScie.category === "W" && parsedScie.found === "result", JSON.stringify(parsedScie));
+  const mjlSsci = '<div>Web of Science Core Collection: Social Sciences Citation Index</div>';
+  check("MJL search: SSCI parses to W", FREE.parseMjlSearchHtml(mjlSsci).category === "W");
+  const mjlAhci = '<div>Web of Science Core Collection: Arts &amp; Humanities Citation Index</div>';
+  check("MJL search: AHCI parses to W", FREE.parseMjlSearchHtml(mjlAhci).category === "W");
+  // THE FAQ TRAP: the same page lists all four indexes in one
+  // sentence with NO colon after "Core Collection". A parser that
+  // merely searches for index names always finds SCIE first and
+  // is wrong. This one must return no index at all.
+  const mjlFaq = '<div>What Is Master Journal List? The Master Journal List includes the complete list of journal in the Web of Science Core Collection (including Science Citation Index Expanded, Social Sciences Citation Index, Arts &amp; Humanities Citation Index, and Emerging Sources Citation Index).</div>';
+  const parsedFaq = FREE.parseMjlSearchHtml(mjlFaq);
+  check("MJL search: FAQ listing all four indexes does NOT parse as SCIE", parsedFaq.index === "" && parsedFaq.category === "" && parsedFaq.found === "unknown", JSON.stringify(parsedFaq));
+  check("MJL search: 0 results is not-indexed", FREE.parseMjlSearchHtml("<p>Found 0 results</p>").found === "not-indexed");
+  check("MJL search: result with no index line is unreadable", FREE.parseMjlSearchHtml("<p>Found 1 results</p><div>Some journal</div>").found === "unreadable");
+  check("indexNameToCategory: ESCI is X, SCIE/SSCI/AHCI are W",
+    FREE.indexNameToCategory("Emerging Sources Citation Index") === "X"
+    && FREE.indexNameToCategory("Science Citation Index Expanded") === "W"
+    && FREE.indexNameToCategory("SSCI") === "W" && FREE.indexNameToCategory("AHCI") === "W"
+    && FREE.indexNameToCategory("") === "");
+  check("sjrLatestYear: Nov 2026 -> 2025 (June release)", FREE.sjrLatestYear(new Date("2026-11-27")) === 2025);
+  check("sjrLatestYear: Jan 2027 -> 2025 (June not yet passed)", FREE.sjrLatestYear(new Date("2027-01-15")) === 2025);
+  check("sjrLatestYear: Jul 2027 -> 2026", FREE.sjrLatestYear(new Date("2027-07-01")) === 2026);
+  check("sjrLatestYear: Jun 2027 -> 2026", FREE.sjrLatestYear(new Date("2027-06-01")) === 2026);
+  check("sjrExportUrl uses out=csv", FREE.sjrExportUrl(2025) === "https://www.scimagojr.com/journalrank.php?year=2025&type=j&out=csv");
+  check("sjrExportUrlAlt uses export=csv", FREE.sjrExportUrlAlt(2025) === "https://www.scimagojr.com/journalrank.php?year=2025&type=j&export=csv");
+  check("isSjrCsv accepts a real SJR header", FREE.isSjrCsv("Rank;Title;Issn;SJR;SJR Best Quartile;H index\n1;Nature;0028-0836;17.5;Q1;500"));
+  check("isSjrCsv rejects an HTML page", !FREE.isSjrCsv("<!DOCTYPE html><html><body>Verify you are human</body></html>"));
+  check("isSjrCsv rejects text without the SJR columns", !FREE.isSjrCsv("Rank,Title,Publisher\n1,Nature,Springer"));
+  check("looksBlocked: 403 / 429 are blocks", FREE.looksBlocked("", 403) && FREE.looksBlocked("", 429));
+  check("looksBlocked: Cloudflare human check is a block", FREE.looksBlocked("Verify you are human", 200));
+  check("looksBlocked: a normal 200 page is not a block", !FREE.looksBlocked("Rank,Title,Issn", 200));
+  check("mjlDownloadsPage is the Clarivate collection list page", FREE.mjlDownloadsPage === "https://mjl.clarivate.com/collection-list-downloads");
+  check("isMjlLoginWall detects the login wall text", FREE.isMjlLoginWall("You will need a free Master Journal List login to access the download files"));
+  check("isMjlLoginWall: a plain page is not a wall", !FREE.isMjlLoginWall("<html><body>Downloads</body></html>"));
+  const dlLinks = FREE.findMjlDownloadLinks('<a href="/downloads/scie.xlsx">Science Citation Index Expanded</a><a href="https://mjl.clarivate.com/downloads/esci.xlsx">Emerging Sources Citation Index</a>');
+  check("findMjlDownloadLinks resolves relative links and keeps labels", dlLinks.length === 2
+    && dlLinks[0].url === "https://mjl.clarivate.com/downloads/scie.xlsx"
+    && dlLinks[0].label.indexOf("Science Citation Index Expanded") !== -1, JSON.stringify(dlLinks));
+  check("findMjlDownloadLinks ignores non-download links", FREE.findMjlDownloadLinks('<a href="/search">Search</a>').length === 0);
+  check("mjlCollectionIndex maps collection labels", FREE.mjlCollectionIndex("Science Citation Index Expanded") === "SCIE"
+    && FREE.mjlCollectionIndex("Emerging Sources Citation Index") === "ESCI"
+    && FREE.mjlCollectionIndex("Social Sciences Citation Index") === "SSCI"
+    && FREE.mjlCollectionIndex("Arts & Humanities Citation Index") === "AHCI"
+    && FREE.mjlCollectionIndex("Something else") === "");
+
+  console.log("== 22. Auto-fetch wiring, expiry, file types, UI polish (27 Nov 2026) ==");
+  // Expiry: stored WoS/SJR data is reused until the next list is
+  // published (about a year) and only re-fetched after expiry.
+  check("sjrExpiresAt: Nov 2026 import expires June 2027", DATA.sjrExpiresAt("2026-11-27") === "2027-06-01T00:00:00.000Z");
+  check("sjrExpiresAt: Feb 2027 import expires June 2027", DATA.sjrExpiresAt("2027-02-10") === "2027-06-01T00:00:00.000Z");
+  check("sjrExpiresAt: Aug 2027 import expires June 2028", DATA.sjrExpiresAt("2027-08-10") === "2028-06-01T00:00:00.000Z");
+  check("mjlExpiresAt: Nov 2026 import expires Nov 2027", DATA.mjlExpiresAt("2026-11-27") === "2027-11-27T00:00:00.000Z");
+  check("monthsLeft: Nov 2026 to June 2027 is 7", DATA.monthsLeft("2027-06-01T00:00:00.000Z", "2026-11-27") === 7);
+  check("monthsLeftText: 7 months left", DATA.monthsLeftText("2027-06-01T00:00:00.000Z", "2026-11-27") === "7 months left");
+  check("monthsLeftText: 12 months left for the WoS list", DATA.monthsLeftText("2027-11-27T00:00:00.000Z", "2026-11-27") === "12 months left");
+  check("monthsLeftText: 1 month left", DATA.monthsLeftText("2027-06-01T00:00:00.000Z", "2027-05-15") === "1 month left");
+  check("monthsLeftText: past expiry is expired", DATA.monthsLeftText("2027-06-01T00:00:00.000Z", "2027-07-01") === "expired");
+  check("expiryMonthLabel: June 2027", DATA.expiryMonthLabel("2027-06-01T00:00:00.000Z") === "June 2027");
+  check("validUntilText SJR: Valid until June 2027, 7 months left", DATA.validUntilText("2026-11-27", "sjr", "2026-11-27") === "Valid until June 2027, 7 months left");
+  check("validUntilText MJL: Valid until November 2027, 12 months left", DATA.validUntilText("2026-11-27", "mjl", "2026-11-27") === "Valid until November 2027, 12 months left");
+  check("isExpired: SJR Nov 2026 is expired by Jul 2027, not by Nov 2026",
+    DATA.isExpired("2026-11-27", "sjr", "2027-07-01") && !DATA.isExpired("2026-11-27", "sjr", "2026-11-27"));
+  // Wiring: auto-fetch toggle, fetch buttons, status lines.
+  check("panel has the Auto-fetch free data toggle, on by default",
+    panelHtml.indexOf('id="auto-fetch"') !== -1 && panelHtml.indexOf("Auto-fetch free data") !== -1
+    && panelHtml.indexOf('<input id="auto-fetch" type="checkbox" checked>') !== -1);
+  check("panel has a free-data status line element", panelHtml.indexOf('id="free-data-status"') !== -1);
+  check("panel has Get free SJR data button + year select",
+    panelHtml.indexOf('id="sjr-fetch"') !== -1 && panelHtml.indexOf("Get free SJR data") !== -1
+    && panelHtml.indexOf('id="sjr-year"') !== -1);
+  check("panel has Get WoS category (free) button", panelHtml.indexOf('id="mjl-fetch"') !== -1 && panelHtml.indexOf("Get WoS category (free)") !== -1);
+  check("panel has Get WoS categories (free) batch button", panelHtml.indexOf('id="batch-mjl"') !== -1 && panelHtml.indexOf("Get WoS categories (free)") !== -1);
+  check("popup.js loads the auto-fetch toggle and triggers a first-run fetch",
+    popupJs.indexOf("loadAutoFetchToggle()") !== -1 && popupJs.indexOf('sendBackgroundMessage({ type: "autoFetchFreeData"') !== -1);
+  check("popup.js SJR button tries background fetch, then the browser-tab download",
+    popupJs.indexOf('sendBackgroundMessage({ type: "fetchSjrExport"') !== -1
+    && popupJs.indexOf('sendBackgroundMessage({ type: "fetchSjrViaTab"') !== -1);
+  check("popup.js SJR button does not re-fetch valid stored data",
+    popupJs.indexOf("data already stored") !== -1 && popupJs.indexOf('DATA.isExpired(latest.importedAt, "sjr")') !== -1);
+  check("popup.js shows remaining time in the status lines",
+    (popupJs.match(/DATA\.validUntilText\(/g) || []).length >= 4);
+  check("popup.js batch WoS button checks each row and stores the answer",
+    popupJs.indexOf('batchMjlBtn.addEventListener("click"') !== -1
+    && popupJs.indexOf("fetchMjlCategory(r.issns)") !== -1);
+  check("popup.js stores an expiry with every SJR/MJL import",
+    popupJs.indexOf("expires: DATA.sjrExpiresAt(importedAt)") !== -1
+    && popupJs.indexOf("expires: DATA.mjlExpiresAt(importedAt)") !== -1);
+  check("old 'Unknown, needs WoS / JCR data' wording is gone from panel and popup",
+    popupJs.indexOf("needs WoS / JCR data") === -1 && panelHtml.indexOf("needs WoS / JCR data") === -1);
+  const bgJs = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
+  check("background has the one-click browser-tab SJR download",
+    bgJs.indexOf("fetchSjrViaTab") !== -1 && bgJs.indexOf("chrome.tabs.create({ url, active: false })") !== -1
+    && bgJs.indexOf('message.type === "fetchSjrViaTab"') !== -1);
+  check("background closes the download tab afterwards", bgJs.indexOf("chrome.tabs.remove(tabId)") !== -1);
+  check("background auto-fetch skips a source whose stored data is still valid",
+    bgJs.indexOf("storedFreeDataValid(meta, \"sjr\")") !== -1 && bgJs.indexOf("storedFreeDataValid(meta, \"mjl\")") !== -1
+    && bgJs.indexOf('"already stored"') !== -1);
+  check("background yearly check re-runs early only when stored data expired",
+    bgJs.indexOf("FDATA.isExpired(sjrFile.importedAt, \"sjr\")") !== -1
+    && bgJs.indexOf("FDATA.isExpired(mjlFile.importedAt, \"mjl\")") !== -1);
+  check("background handles fetchMjlCategory and fetchSjrExport messages",
+    bgJs.indexOf('message.type === "fetchMjlCategory"') !== -1
+    && bgJs.indexOf('message.type === "fetchSjrExport"') !== -1);
+  check("manifest is 0.4.0 with MJL and SJR host permissions",
+    manifest.version === "0.4.0"
+    && manifest.host_permissions.indexOf("https://mjl.clarivate.com/*") !== -1
+    && manifest.host_permissions.indexOf("https://www.scimagojr.com/*") !== -1
+    && manifest.host_permissions.indexOf("https://scimagojr.com/*") !== -1);
+  // File types: each upload button takes only its own types.
+  check("shared fileExtension: .XLSX lowercased, no extension is empty",
+    SHARED.fileExtension("Report.XLSX") === ".xlsx" && SHARED.fileExtension("data.csv") === ".csv"
+    && SHARED.fileExtension("noext") === "" && SHARED.fileExtension("archive.tar.gz") === ".gz");
+  check("shared isAllowedFileType: case-insensitive, rejects .pdf for CSV",
+    SHARED.isAllowedFileType("a.CSV", [".csv"]) && !SHARED.isAllowedFileType("a.pdf", [".csv"])
+    && SHARED.isAllowedFileType("a.xls", [".csv", ".xlsx", ".xls"])
+    && !SHARED.isAllowedFileType("a.xlsx", [".csv"]));
+  check("article list picker takes .csv, .xlsx, .xls only",
+    /id="batch-file"[^>]*accept="\.csv,\.xlsx,\.xls"/.test(panelHtml));
+  check("JCR picker takes .csv, .xlsx, .xls only",
+    /id="jcr-file"[^>]*accept="\.csv,\.xlsx,\.xls"/.test(panelHtml));
+  check("SJR picker takes .csv only",
+    /id="sjr-file"[^>]*accept="\.csv"/.test(panelHtml));
+  check("WoS list picker takes .csv, .xlsx, .xls only",
+    /id="mjl-file"[^>]*accept="\.csv,\.xlsx,\.xls"/.test(panelHtml));
+  check("popup.js defines the per-button allowed type lists",
+    /const ARTICLE_FILE_TYPES = \["\.csv", "\.xlsx", "\.xls"\]/.test(popupJs)
+    && /const JCR_FILE_TYPES = \["\.csv", "\.xlsx", "\.xls"\]/.test(popupJs)
+    && /const SJR_FILE_TYPES = \["\.csv"\]/.test(popupJs)
+    && /const MJL_FILE_TYPES = \["\.csv", "\.xlsx", "\.xls"\]/.test(popupJs));
+  check("popup.js rejects a wrong file type with a short plain error",
+    popupJs.indexOf("wrongTypeMessage") !== -1
+    && popupJs.indexOf("Use a ${list} file for ${what}.") !== -1);
+  check("popup.js checks the type when a file is chosen (all four buttons)",
+    popupJs.indexOf("wrongTypeMessage(file, ARTICLE_FILE_TYPES") !== -1
+    && popupJs.indexOf("wrongTypeMessage(f, JCR_FILE_TYPES") !== -1
+    && popupJs.indexOf("wrongTypeMessage(f, SJR_FILE_TYPES") !== -1
+    && popupJs.indexOf("wrongTypeMessage(f, MJL_FILE_TYPES") !== -1);
+  check("popup.js SJR import re-checks the type before reading the file",
+    popupJs.indexOf("files.find((f) => wrongTypeMessage(f, SJR_FILE_TYPES") !== -1);
+  check("spreadsheet reader rejects other types and names all three",
+    popupJs.indexOf("Unsupported file type — use a .csv, .xlsx or .xls file.") !== -1);
+  // UI polish: buttons (upload stands out), hierarchy, scanability.
+  check("upload button stands out: navy, taller, stronger shadow",
+    /#batch-run\s*\{[^}]*background:\s*#12324f[^}]*min-height:\s*46px[^}]*box-shadow:\s*0 2px 6px/.test(css));
+  check("primary buttons share one style with a soft shadow",
+    /\.primary\s*\{[^}]*box-shadow:\s*0 1px 3px/.test(css));
+  check("file-choose buttons are consistent inline-flex tap targets",
+    /\.file-label\s*\{[^}]*display:\s*inline-flex[^}]*min-height:\s*36px/.test(css));
+  check("checkbox toggle has its own rule (not the full-width input style)",
+    /\.toggle\s*\{[^}]*display:\s*flex/.test(css) && /\.toggle input\s*\{[^}]*width:\s*auto/.test(css));
+  check("sections are divided by a thin rule", css.indexOf("main > section + section") !== -1);
+  check("batch table has zebra rows for scanning", css.indexOf("tbody tr:nth-child(even)") !== -1);
+  check("result card is lifted with a soft shadow", /\.result\s*\{[^}]*box-shadow:\s*0 1px 4px/.test(css));
+  check("mode tabs and ghost buttons meet a 36px tap target",
+    /\.mode-tab\s*\{[^}]*min-height:\s*40px/.test(css) && /\.ghost\s*\{[^}]*min-height:\s*36px/.test(css));
+
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));
   process.exit(fail ? 1 : 0);

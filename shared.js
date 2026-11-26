@@ -156,6 +156,21 @@ function buildFullTabUrl(baseUrl) {
   return url + (url.indexOf("?") === -1 ? "?view=fulltab" : "&view=fulltab");
 }
 
+// ---------- Upload file-type guard ----------
+// Each upload button only takes specific file types. The file
+// input's accept attribute limits the picker, but "All files" can
+// bypass it, so the code checks the extension too and rejects
+// anything else with a short plain error. Pure, Node-testable.
+function fileExtension(fileName) {
+  const name = String(fileName || "").trim();
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot).toLowerCase() : "";
+}
+
+function isAllowedFileType(fileName, allowed) {
+  return (allowed || []).indexOf(fileExtension(fileName)) !== -1;
+}
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     extractDoi: extractDoi,
@@ -165,5 +180,7 @@ if (typeof module !== "undefined" && module.exports) {
     parseDoiFromHtml: parseDoiFromHtml,
     isFullTabUrl: isFullTabUrl,
     buildFullTabUrl: buildFullTabUrl,
+    fileExtension: fileExtension,
+    isAllowedFileType: isAllowedFileType,
   };
 }
