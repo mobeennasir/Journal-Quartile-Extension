@@ -226,21 +226,175 @@ async function main() {
   console.log("== 16. Label audit (sidepanel.html) ==");
   const html2 = fs.readFileSync(path.join(DIR, "..", "sidepanel.html"), "utf8");
   const requiredLabels = [
-    "Lookup by DOI", "Lookup by article link", "Enter details manually",
-    "Upload a list of articles (Excel / CSV)",
-    "Import JCR data (for quartile + Impact Factor)",
-    "Import SJR data (fallback quartile — NOT JCR)",
-    "Import WoS journal list (for category W / X)",
+    "DOI or article link", "Enter details manually",
+    "Upload a list (Excel / CSV)",
+    "Import JCR data",
+    "Import SJR data",
+    "Import WoS journal list",
     "Look up", "Upload and check all articles", "Import JCR file",
     "Download results as CSV", "Use the Naqqash test set (67 articles)",
     "Data year this export covers",
     "JCR quartile (year)", "Impact Factor — JCR (year)",
   ];
   requiredLabels.forEach((label) => check(`label present: "${label}"`, html2.indexOf(label) !== -1));
+  // Merged 27 Nov 2026: "Lookup by DOI" and "Lookup by article link"
+  // are no longer separate tabs. One option, "DOI or article link",
+  // accepts a bare DOI, a doi.org link, or a publisher article URL.
+  check("no separate 'Lookup by DOI' tab label", html2.indexOf("Lookup by DOI") === -1);
+  check("no separate 'Lookup by article link' tab label", html2.indexOf("Lookup by article link") === -1);
+  check("merged label description present", html2.indexOf("Bare DOI, doi.org link, or publisher article URL.") !== -1);
   const js = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
   check("result label: SJR quartile — fallback, NOT JCR", js.indexOf("SJR quartile — fallback, NOT JCR") !== -1);
   check("result label: No JCR data for this year", js.indexOf("No JCR data for this year") !== -1);
   check("no bare 'Submit' or 'Go' button labels", !/>(Submit|Go)</.test(html2));
+
+  console.log("== 17. Full-tab button bug (27 Nov 2026) ==");
+  // The bug: "Open in a full tab" was still shown when the page was
+  // ALREADY a full tab, and clicking it opened ANOTHER new tab.
+  // Fix: hide the button in a full tab (URL marker ?view=fulltab,
+  // plus chrome.tabs.getCurrent as backup) and refuse to open
+  // anything from a full tab; the button opens exactly one tab via
+  // chrome.tabs.create. The pure detection helpers live in shared.js
+  // so Node can test them directly.
+  const SHARED = require("../shared.js");
+  check("isFullTabUrl: sidepanel.html?view=fulltab is a full tab",
+    SHARED.isFullTabUrl("chrome-extension://fgkamfamhijbkaiddhhdinhlkjghmnlk/sidepanel.html?view=fulltab"));
+  check("isFullTabUrl: plain sidepanel.html (side panel) is NOT a full tab",
+    !SHARED.isFullTabUrl("chrome-extension://fgkamfamhijbkaiddhhdinhlkjghmnlk/sidepanel.html"));
+  check("isFullTabUrl: ?view=sidepanel is NOT a full tab",
+    !SHARED.isFullTabUrl("chrome-extension://fgkamfamhijbkaiddhhdinhlkjghmnlk/sidepanel.html?view=sidepanel"));
+  check("isFullTabUrl: marker among other params still counts",
+    SHARED.isFullTabUrl("chrome-extension://x/sidepanel.html?x=1&view=fulltab"));
+  check("isFullTabUrl: empty / null is NOT a full tab",
+    !SHARED.isFullTabUrl("") && !SHARED.isFullTabUrl(null));
+  check("isFullTabUrl: relative sidepanel.html is NOT a full tab",
+    !SHARED.isFullTabUrl("sidepanel.html"));
+  check("buildFullTabUrl adds ?view=fulltab",
+    SHARED.buildFullTabUrl("chrome-extension://x/sidepanel.html") === "chrome-extension://x/sidepanel.html?view=fulltab");
+  check("buildFullTabUrl keeps existing query with &view=fulltab",
+    SHARED.buildFullTabUrl("chrome-extension://x/sidepanel.html?x=1") === "chrome-extension://x/sidepanel.html?x=1&view=fulltab");
+  check("buildFullTabUrl is idempotent on an already-marked URL",
+    SHARED.buildFullTabUrl("chrome-extension://x/sidepanel.html?view=fulltab") === "chrome-extension://x/sidepanel.html?view=fulltab");
+  const popupJs = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  check("popup.js hides the button when the page is a full tab", popupJs.indexOf("openTabBtn.hidden = true") !== -1);
+  check("popup.js checks the ?view=fulltab marker", popupJs.indexOf("isFullTabUrl(window.location.href)") !== -1);
+  check("popup.js falls back to chrome.tabs.getCurrent for a directly-opened tab", popupJs.indexOf("chrome.tabs.getCurrent") !== -1);
+  check("popup.js click handler refuses to open a tab from a full tab",
+    popupJs.indexOf('if (isFullTabUrl(window.location.href)) return;') !== -1);
+  check("popup.js opens the full tab with chrome.tabs.create (exactly one call site)",
+    (popupJs.match(/chrome\.tabs\.create\(/g) || []).length === 1);
+  check("popup.js opens the marked URL (buildFullTabUrl)", popupJs.indexOf("buildFullTabUrl(base)") !== -1);
+  const css = fs.readFileSync(path.join(DIR, "..", "popup.css"), "utf8");
+  check("popup.css: [hidden] actually hides (author display rules beat the UA style)",
+    /\[hidden\]\s*\{\s*display:\s*none\s*!important/.test(css));
+  const manifest = JSON.parse(fs.readFileSync(path.join(DIR, "..", "manifest.json"), "utf8"));
+  check("manifest name is Phase 2, not Phase 1", manifest.name === "Journal Quartile Extension — Phase 2");
+  const panelHtml = fs.readFileSync(path.join(DIR, "..", "sidepanel.html"), "utf8");
+  check("sidepanel title is Phase 2, not Phase 1 Spike",
+    panelHtml.indexOf("<title>Journal Quartile Extension — Phase 2</title>") !== -1
+    && panelHtml.indexOf("Phase 1 Spike") === -1);
+
+  console.log("== 18. Merged DOI / article-link lookup (27 Nov 2026) ==");
+  // User correction: DOI and article link are ONE option, as in
+  // Phase 1. One input, one tab, one lookup handler that accepts a
+  // bare DOI, a doi.org link, or a publisher article URL.
+  check("exactly two single-article mode tabs (DOI/link + manual)",
+    (panelHtml.match(/id="mode-/g) || []).length === 2
+    && panelHtml.indexOf('id="mode-doi"') !== -1
+    && panelHtml.indexOf('id="mode-manual"') !== -1);
+  check("no mode-link tab, pane-link, input-link or lookup-link ids left",
+    panelHtml.indexOf("mode-link") === -1 && panelHtml.indexOf("pane-link") === -1
+    && panelHtml.indexOf("input-link") === -1 && panelHtml.indexOf("lookup-link") === -1);
+  check("merged pane keeps Check this page", panelHtml.indexOf('id="check-page"') !== -1);
+  check("merged pane label is 'DOI or article link'",
+    panelHtml.indexOf('<label for="input">DOI or article link</label>') !== -1);
+  check("popup.js MODES has only doi and manual",
+    /const MODES = \["doi", "manual"\]/.test(popupJs));
+  check("popup.js has no link-mode handler or link input left",
+    popupJs.indexOf("onLookupLinkClick") === -1 && popupJs.indexOf("input-link") === -1
+    && popupJs.indexOf("lookup-link") === -1);
+  check("popup.js merged handler tries DOI then a URL",
+    popupJs.indexOf("extractDoi(raw)") !== -1 && popupJs.indexOf("resolveDoiFromUrl(raw)") !== -1);
+  check("popup.js no longer mentions the old separate tab names",
+    popupJs.indexOf("Lookup by DOI") === -1 && popupJs.indexOf("Lookup by article link") === -1);
+
+  console.log("== 19. Minimal UI text (27 Nov 2026) ==");
+  // Function oriented, not too much text: short labels only, no
+  // long explanations. Result labels (source + year) are data and
+  // are NOT trimmed.
+  check("no long single-article intro left", panelHtml.indexOf("Pick how you want to find the article") === -1);
+  check("no long batch explanation left", panelHtml.indexOf("A missing DOI is fine") === -1);
+  check("no long JCR explanation left", panelHtml.indexOf("JCR is subscription-only") === -1);
+  check("no long SJR explanation left", panelHtml.indexOf("scimagojr.com") === -1);
+  check("no long WoS explanation left", panelHtml.indexOf("Master Journal List export (CSV)") === -1);
+  check("no Check-this-page hint paragraph left", panelHtml.indexOf("Already on the article page?") === -1);
+  check("short batch heading present", panelHtml.indexOf("Upload a list (Excel / CSV)") !== -1);
+  check("short JCR heading present", panelHtml.indexOf("<h2 id=\"jcr-heading\">Import JCR data</h2>") !== -1);
+  check("result labels kept: JCR quartile with year", popupJs.indexOf("JCR quartile (\" + year + \")") !== -1);
+  check("result labels kept: SJR fallback NOT JCR", popupJs.indexOf("SJR quartile — fallback, NOT JCR") !== -1);
+
+  console.log("== 20. Fast, robust, dynamic (27 Nov 2026) ==");
+  // net.js: timeout + one retry, bounded cache with in-flight
+  // dedup. popup.js uses it; batch renders per row live.
+  const NET = require("../net.js");
+  const okJson = (obj) => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify(obj),
+  });
+  // Retry on 429, then succeed.
+  let calls429 = 0;
+  const fetch429 = async () => {
+    calls429++;
+    if (calls429 === 1) return { ok: false, status: 429, text: async () => "" };
+    return okJson({ ok: true });
+  };
+  const out429 = await NET.fetchJson("https://example.invalid/x", { fetchFn: fetch429, timeoutMs: 5000, retries: 1 });
+  check("fetchJson retries once on 429 then succeeds", out429.ok === true && calls429 === 2, "calls " + calls429);
+  // Empty body is retried, then reported as an error, not a blank result.
+  let callsEmpty = 0;
+  const fetchEmpty = async () => { callsEmpty++; return { ok: true, status: 200, text: async () => "" }; };
+  let emptyErr = null;
+  try { await NET.fetchJson("https://example.invalid/y", { fetchFn: fetchEmpty, timeoutMs: 5000, retries: 1 }); }
+  catch (err) { emptyErr = err; }
+  check("fetchJson retries an empty body then throws a short error", callsEmpty === 2 && emptyErr && emptyErr.message.length < 60, "calls " + callsEmpty);
+  // Timeout aborts a hung request instead of freezing the panel.
+  const fetchHang = () => new Promise(() => {});
+  let timeoutErr = null;
+  try { await NET.fetchJson("https://example.invalid/z", { fetchFn: fetchHang, timeoutMs: 50, retries: 0 }); }
+  catch (err) { timeoutErr = err; }
+  check("fetchJson aborts a hung request with a timeout error", timeoutErr && timeoutErr.message === "Request timed out");
+  // Persistent failure throws after the retry, never a blank result.
+  let callsFail = 0;
+  const fetchFail = async () => { callsFail++; throw new Error("network down"); };
+  let failErr = null;
+  try { await NET.fetchJson("https://example.invalid/w", { fetchFn: fetchFail, timeoutMs: 5000, retries: 1 }); }
+  catch (err) { failErr = err; }
+  check("fetchJson throws after retries are exhausted", callsFail === 2 && failErr !== null, "calls " + callsFail);
+  // Cache: one fetch for two identical lookups; LRU eviction.
+  const cache = new NET.ArticleCache(2);
+  let fetchCount = 0;
+  const loader = async () => { fetchCount++; return { n: fetchCount }; };
+  const first = await cache.getOrFetch("doi:10.1/x", loader);
+  const second = await cache.getOrFetch("doi:10.1/x", loader);
+  check("cache returns the stored result without re-fetching", first === second && fetchCount === 1, "fetches " + fetchCount);
+  const [a, b] = await Promise.all([
+    cache.getOrFetch("doi:10.1/a", loader),
+    cache.getOrFetch("doi:10.1/a", loader),
+  ]);
+  check("cache dedupes two identical lookups started together", a === b && fetchCount === 2, "fetches " + fetchCount);
+  await cache.getOrFetch("doi:10.1/b", loader);
+  await cache.getOrFetch("doi:10.1/c", loader);
+  check("cache evicts the oldest entry past its limit", cache.get("doi:10.1/x") === undefined && cache.get("doi:10.1/b") !== undefined);
+  // Wiring in popup.js and the panel.
+  check("popup.js uses net.js fetchJson", popupJs.indexOf("NET.fetchJson(url)") !== -1);
+  check("popup.js caches DOI lookups", popupJs.indexOf('articleCache.getOrFetch("doi:"') !== -1);
+  check("popup.js caches title lookups", popupJs.indexOf('articleCache.getOrFetch(key, run)') !== -1);
+  check("popup.js shows live status while checking the ranking", popupJs.indexOf("Found article. Checking ranking") !== -1);
+  check("popup.js publisher fetch has a 10s timeout", popupJs.indexOf("setTimeout(() => controller.abort(), 10000)") !== -1);
+  check("popup.js falls back to in-memory storage with a note", popupJs.indexOf("showStorageFallbackNote()") !== -1);
+  check("batch renders each row as it arrives", popupJs.indexOf("batchTbodyEl.appendChild(renderBatchRow(result))") !== -1);
+  check("sidepanel loads net.js", panelHtml.indexOf('<script src="net.js"></script>') !== -1);
+  check("sidepanel has a storage-fallback note element", panelHtml.indexOf('id="storage-note"') !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));

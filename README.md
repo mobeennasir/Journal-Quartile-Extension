@@ -17,21 +17,20 @@ A 2021 article needs the journal's 2021 ranking. A 2026 ranking would be the wro
 
 ### Look up one article
 
-Three lookup methods are available in the panel:
+Two lookup methods are available in the panel:
 
-- **Lookup by DOI.** Paste a DOI, for example `10.1038/nature14539`.
-- **Lookup by article link.** Paste any publisher article link, for example a nature.com or ScienceDirect link. The DOI is read from the article page itself.
+- **DOI or article link.** Paste a bare DOI, a doi.org link, or any publisher article URL, for example `10.1038/nature14539` or a nature.com or ScienceDirect link. The DOI is read from the article page itself when a link is pasted.
 - **Enter details manually.** For old articles with no DOI or link. Type the title, journal, and year. DOI and ISSN are optional.
 
 **Check this page** reads the DOI from the open article tab. Use it when a publisher blocks the automatic page read. Open the article in a tab, open the extension panel, and tap the button.
 
 ### Check a list of articles
 
-**Upload a list of articles (Excel / CSV).** Upload a `.csv` or `.xlsx` file with one article per row. Columns it understands: title, journal, year, DOI if known, ISSN if known, volume and pages. A DOI is not required. Each article is located by its title and journal. The extension returns one result row per article, with the quartile and Impact Factor for that article's own year. Results can be saved with **Download results as CSV**.
+**Upload a list (Excel / CSV).** Upload a `.csv` or `.xlsx` file with one article per row. Columns it understands: title, journal, year, DOI if known, ISSN if known, volume and pages. A DOI is not required. Each article is located by its title and journal. The extension returns one result row per article, with the quartile and Impact Factor for that article's own year. Results can be saved with **Download results as CSV**.
 
 A built-in test set is included, containing 67 publications from the Google Scholar profile of Dr. Tahir Naqqash. It is available in the panel as **Use the Naqqash test set (67 articles)**.
 
-### Import JCR data (for quartile and Impact Factor)
+### Import JCR data
 
 **Import JCR data.** Upload your own JCR export file (CSV, `.xlsx`, or HTML-table `.xls`). The data is saved in the extension and reused until the next JCR release in June. You pick the **Data year this export covers**, which is the year the numbers describe, not the year you downloaded the file. Multiple files merge. The file name, edition year, upload date, and expiry are shown in the panel.
 
@@ -72,18 +71,19 @@ After any update, run `git pull` in the folder, then click **Reload** on the ext
 
 1. **One article:** paste a DOI or article link and click **Look up**. Or use **Enter details manually** for an article with no DOI.
 2. **First time setup:** click **Import JCR data** and upload a JCR export, picking the data year it covers. Without this, results will say "No JCR data for this year", which is correct, not an error.
-3. **A list of articles:** click **Upload a list of articles (Excel / CSV)**, choose the file, then **Upload and check all articles**. Use **Download results as CSV** to save the results.
+3. **A list of articles:** click **Upload a list (Excel / CSV)**, choose the file, then **Upload and check all articles**. Use **Download results as CSV** to save the results.
 4. **Blocked publisher page:** if a lookup says the publisher blocked the automatic read, open the article in a tab and tap **Check this page**.
 
 ## Status
 
-Version **0.3.0 (Phase 2)**, 27 November 2026. Tests pass: `node tests/run-tests.js` gives 78 passed, 0 failed.
+Version **0.3.0 (Phase 2)**, 27 November 2026. Tests pass: `node tests/run-tests.js` gives 114 passed, 0 failed.
 
 ## Files
 
 - `manifest.json` - Manifest V3, version 0.3.0.
 - `sidepanel.html`, `popup.css`, `popup.js` - the side panel UI and logic. Plain HTML and JavaScript, no dependencies, no build step, no remotely hosted code.
 - `shared.js` - the one copy of the DOI logic, shared by the page and the service worker.
+- `net.js` - JSON fetch with timeout and one retry, plus a bounded article cache so a repeated lookup does not re-fetch.
 - `background.js` - service worker. Fetches an article page and reads the DOI from its metadata, and reads the DOI from the open tab for Check this page.
 - `jcr.js` - JCR, SJR and Master Journal List parsers, the IndexedDB store, year-exact lookup, and results CSV builder.
 - `xlsx.js` - minimal bundled `.xlsx` reader.

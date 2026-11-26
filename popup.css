@@ -1,4 +1,11 @@
 * { box-sizing: border-box; }
+/* The `hidden` attribute must actually hide things: several rules in
+   this file set `display` on buttons and panes (e.g. .ghost is
+   display: block), and an author display rule beats the browser's
+   built-in [hidden] style — without this rule, `button.hidden = true`
+   on "Open in a full tab" would leave the button visible. That is
+   half of the full-tab bug reported 27 Nov 2026. */
+[hidden] { display: none !important; }
 body {
   margin: 0;
   min-height: 100vh;

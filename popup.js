@@ -10,12 +10,14 @@
 const MAILTO = "mubeennasir117@gmail.com";
 const DATA = (typeof JournalQuartileData !== "undefined") ? JournalQuartileData : null;
 const XLSX = (typeof JournalQuartileXlsx !== "undefined") ? JournalQuartileXlsx : null;
+const NET = (typeof JournalQuartileNet !== "undefined") ? JournalQuartileNet : null;
+// Cache of fetched articles (DOI and title lookups), so a repeat
+// lookup returns instantly without re-fetching.
+const articleCache = NET ? new NET.ArticleCache(200) : null;
 
 // ---------- Element handles ----------
 const inputEl = document.getElementById("input");
-const inputLinkEl = document.getElementById("input-link");
 const lookupBtn = document.getElementById("lookup");
-const lookupLinkBtn = document.getElementById("lookup-link");
 const statusEl = document.getElementById("status");
 const resultEl = document.getElementById("result");
 const openTabBtn = document.getElementById("open-tab");
@@ -50,6 +52,17 @@ const mjlFileNameEl = document.getElementById("mjl-file-name");
 const mjlImportBtn = document.getElementById("mjl-import");
 const mjlStatusEl = document.getElementById("mjl-status");
 const clearDataBtn = document.getElementById("clear-data");
+const storageNoteEl = document.getElementById("storage-note");
+
+// Show a short note when imported data cannot persist (IndexedDB
+// unavailable, e.g. private mode): lookups still work, but imports
+// are kept in memory for this session only.
+function showStorageFallbackNote() {
+  if (storageNoteEl) {
+    storageNoteEl.textContent = "Storage: in-memory only. Imported data will not persist after the panel closes.";
+    storageNoteEl.hidden = false;
+  }
+}
 
 // ---------- Ranking store (IndexedDB, memory fallback) ----------
 let store = null;
@@ -59,6 +72,7 @@ function getStore() {
     store = new DATA.IdbStore();
   } catch (err) {
     store = new DATA.MemoryStore();
+    showStorageFallbackNote();
   }
   return store;
 }
@@ -71,12 +85,16 @@ async function safeGetRank(issns, year) {
     // fresh in-memory store — imported data won't persist, but the
     // lookup still works for this session.
     store = new DATA.MemoryStore();
+    showStorageFallbackNote();
     try { return await store.getRank(issns, year); } catch (e) { return null; }
   }
 }
 
 // ---------- Mode tabs ----------
-const MODES = ["doi", "link", "manual"];
+// Two modes only: "DOI or article link" (one input that accepts a
+// bare DOI, a doi.org link, or a publisher article URL, as in
+// Phase 1) and "Enter details manually".
+const MODES = ["doi", "manual"];
 function setMode(mode) {
   MODES.forEach((m) => {
     const tab = document.getElementById("mode-" + m);
@@ -116,14 +134,22 @@ async function resolveDoiFromUrl(raw) {
   const slugDoi = doiFromSlug(url);
   if (slugDoi) return { doi: slugDoi, blocked: false };
   try {
-    const response = await fetch(url, { headers: { Accept: "text/html" } });
+    // 10s timeout: a hung publisher fetch must not freeze the panel.
+    const controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 10000) : null;
+    let response;
+    try {
+      response = await fetch(url, { headers: { Accept: "text/html" }, signal: controller ? controller.signal : undefined });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (response.ok) {
       const doi = parseDoiFromHtml(await response.text());
       if (doi) return { doi, blocked: false };
     } else if (response.status === 403 || response.status === 429) {
       return { doi: null, blocked: true, host, status: response.status };
     }
-  } catch (err) { /* ignore */ }
+  } catch (err) { /* ignore: timeout or network error means no DOI from this page */ }
   return { doi: null, blocked: false };
 }
 
@@ -269,7 +295,6 @@ function showError(message) {
 
 function setLoading(loading, message) {
   lookupBtn.disabled = loading;
-  if (lookupLinkBtn) lookupLinkBtn.disabled = loading;
   if (lookupManualBtn) lookupManualBtn.disabled = loading;
   lookupBtn.textContent = loading ? "Looking up…" : "Look up";
   lookupBtn.setAttribute("aria-busy", loading ? "true" : "false");
@@ -281,46 +306,38 @@ function setLoading(loading, message) {
 }
 
 async function fetchJson(url) {
-  // One retry after a short pause: Crossref occasionally drops a
-  // request (empty response) on the anonymous tier; the polite
-  // pool (mailto=) plus a retry keeps a batch from losing rows.
-  let lastError = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!response.ok) {
-        const error = new Error(`HTTP ${response.status}`);
-        error.status = response.status;
-        throw error;
-      }
-      return await response.json();
-    } catch (err) {
-      lastError = err;
-      // 429 / dropped connection: wait longer before the one retry.
-      if (attempt === 0) await sleep(err && err.status === 429 ? 2000 : 1200);
-    }
-  }
-  throw lastError;
+  // Timeout + one retry live in net.js: a 429, a dropped
+  // connection, an empty body, or a hung request is retried once
+  // and then reported as a short error, never a blank result.
+  if (NET) return NET.fetchJson(url);
+  const response = await fetch(url, { headers: { Accept: "application/json" } });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  return response.json();
 }
 
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 // Fetch one article by DOI: Crossref first, OpenAlex fallback.
-// Returns { data, sourceName } or null when not found.
+// Returns { data, sourceName } or null when not found. Results are
+// cached, so looking up the same DOI twice does not re-fetch.
 async function fetchArticleByDoi(doi) {
-  try {
-    const data = await fetchJson(
-      `https://api.crossref.org/works/${encodeURIComponent(doi)}?mailto=${encodeURIComponent(MAILTO)}`
-    );
-    if (data && data.message) return { data: normaliseCrossref(data.message), sourceName: "Crossref" };
-  } catch (err) { /* fall through to OpenAlex */ }
-  try {
-    const work = await fetchJson(
-      `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?mailto=${encodeURIComponent(MAILTO)}`
-    );
-    if (work && work.display_name) return { data: normaliseOpenAlex(work), sourceName: "OpenAlex" };
-  } catch (err) { /* not found */ }
-  return null;
+  const run = async () => {
+    try {
+      const data = await fetchJson(
+        `https://api.crossref.org/works/${encodeURIComponent(doi)}?mailto=${encodeURIComponent(MAILTO)}`
+      );
+      if (data && data.message) return { data: normaliseCrossref(data.message), sourceName: "Crossref" };
+    } catch (err) { /* fall through to OpenAlex */ }
+    try {
+      const work = await fetchJson(
+        `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?mailto=${encodeURIComponent(MAILTO)}`
+      );
+      if (work && work.display_name) return { data: normaliseOpenAlex(work), sourceName: "OpenAlex" };
+    } catch (err) { /* not found */ }
+    return null;
+  };
+  if (articleCache) return articleCache.getOrFetch("doi:" + doi.toLowerCase(), run);
+  return run();
 }
 
 // How much of the wanted title appears in the candidate title
@@ -336,8 +353,12 @@ function titleOverlap(wanted, candidate) {
 }
 
 // Find an article by title (+ journal + year when known).
-// Returns { data, sourceName, resolvedBy } or null.
+// Returns { data, sourceName, resolvedBy } or null. Cached by
+// title + journal + year, so batch rows for the same article share
+// one search instead of re-fetching.
 async function fetchArticleByTitle(title, journal, year) {
+  const key = "title:" + String(title || "").toLowerCase() + "|" + String(journal || "").toLowerCase() + "|" + (year || "");
+  const run = async () => {
   // Crossref title search.
   try {
     const params = new URLSearchParams();
@@ -375,6 +396,9 @@ async function fetchArticleByTitle(title, journal, year) {
     }
   } catch (err) { /* not found */ }
   return null;
+  };
+  if (articleCache) return articleCache.getOrFetch(key, run);
+  return run();
 }
 
 async function lookup(doi) {
@@ -383,9 +407,11 @@ async function lookup(doi) {
   try {
     const found = await fetchArticleByDoi(doi);
     if (found) {
+      statusEl.textContent = "Found article. Checking ranking…";
+      statusEl.classList.add("loading");
+      await showResult(found.data, found.sourceName);
       statusEl.textContent = "";
       statusEl.classList.remove("loading");
-      await showResult(found.data, found.sourceName);
       return;
     }
     showError(`Not found: no record for ${doi} in Crossref or OpenAlex. Check the DOI and try again.`);
@@ -397,42 +423,41 @@ async function lookup(doi) {
 }
 
 async function onLookupClick() {
-  let doi = extractDoi(inputEl.value);
-  if (!doi) {
-    showError("No DOI found. Paste a DOI like 10.1038/nature14539 — or switch to “Lookup by article link” for a publisher URL, or “Enter details manually” for an article with no DOI.");
+  const raw = (inputEl.value || "").trim();
+  // One input for all three: a bare DOI, a doi.org link, or a
+  // publisher article URL. The DOI logic itself lives in shared.js
+  // and is unchanged; only the UI tabs were merged.
+  const doi = extractDoi(raw);
+  if (doi) {
+    lookup(doi);
     return;
   }
-  lookup(doi);
-}
-
-async function onLookupLinkClick() {
-  const raw = (inputLinkEl.value || "").trim();
-  if (!/^https?:\/\//i.test(raw)) {
-    showError("Paste a full article link, starting with https:// — for example a nature.com or ScienceDirect article link.");
+  if (/^https?:\/\//i.test(raw)) {
+    setLoading(true, "No DOI in the link — checking the article page …");
+    try {
+      const resolved = await resolveDoiFromUrl(raw);
+      if (resolved.blocked) {
+        setLoading(false);
+        showError(
+          `That publisher (${resolved.host || "this site"}) blocked the page read` +
+          (resolved.status ? ` (HTTP ${resolved.status})` : "") +
+          `. Open the article in a tab and tap “Check this page”, or copy the DOI from the page and paste it here.`
+        );
+        return;
+      }
+      if (!resolved.doi) {
+        setLoading(false);
+        showError("No DOI found on that page. Copy the DOI from the article page, or enter the details manually.");
+        return;
+      }
+      inputEl.value = resolved.doi;
+      await lookup(resolved.doi);
+    } finally {
+      setLoading(false);
+    }
     return;
   }
-  setLoading(true, "No DOI in the link — checking the article page …");
-  try {
-    const resolved = await resolveDoiFromUrl(raw);
-    if (resolved.blocked) {
-      setLoading(false);
-      showError(
-        `That publisher (${resolved.host || "this site"}) blocked the automatic page read` +
-        (resolved.status ? ` (HTTP ${resolved.status}, bot check)` : " (bot check)") +
-        `. The DOI could not be read from the page. If the article is open in a tab, tap “Check this page — read the DOI from the open article tab” — it reads the DOI from the open page instead. Otherwise, open the article in Chrome and copy the DOI from the page itself, then paste the DOI here.`
-      );
-      return;
-    }
-    if (!resolved.doi) {
-      setLoading(false);
-      showError("No DOI found on that page. Copy the DOI from the article page and use “Lookup by DOI”, or enter the details manually.");
-      return;
-    }
-    inputEl.value = resolved.doi;
-    await lookup(resolved.doi);
-  } finally {
-    setLoading(false);
-  }
+  showError("No DOI found. Paste a DOI, a doi.org link, or a publisher article URL. Or enter the details manually.");
 }
 
 async function onLookupManualClick() {
@@ -448,7 +473,7 @@ async function onLookupManualClick() {
     return;
   }
   if (!title || !journal || !year) {
-    showError("Enter the article title, the journal name and the year published — all three are needed to search without a DOI.");
+    showError("Enter the title, journal and year. All three are needed.");
     return;
   }
   setLoading(true, `Searching Crossref for “${title.slice(0, 60)}…” …`);
@@ -456,8 +481,7 @@ async function onLookupManualClick() {
   try {
     const found = await fetchArticleByTitle(title, journal, year);
     if (found) {
-      statusEl.textContent = "";
-      statusEl.classList.remove("loading");
+      statusEl.textContent = "Found article. Checking ranking…";
       const data = found.data;
       if (issn && (!data.issns || !data.issns.length)) {
         data.issns = [issn];
@@ -465,9 +489,11 @@ async function onLookupManualClick() {
       }
       if (!data.year) data.year = String(year);
       await showResult(data, found.sourceName + (found.resolvedBy ? " — " + found.resolvedBy : ""));
+      statusEl.textContent = "";
+      statusEl.classList.remove("loading");
       return;
     }
-    showError(`Not found: no article matching that title in ${journal} (${year}) in Crossref or OpenAlex. Check the spelling of the title and journal, and the year.`);
+    showError(`Not found: no article matching that title in ${journal} (${year}). Check the title, journal and year.`);
   } catch (err) {
     showError("Network error: could not reach Crossref or OpenAlex. Check your connection and try again.");
   } finally {
@@ -479,7 +505,7 @@ async function onCheckPageClick() {
   setLoading(true, "Reading this page …");
   try {
     if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
-      showError("“Check this page” needs the extension running in Chrome — paste the DOI or link above instead.");
+      showError("“Check this page” needs the extension running in Chrome. Paste the DOI or link above instead.");
       return;
     }
     const response = await new Promise((resolve) => {
@@ -493,7 +519,7 @@ async function onCheckPageClick() {
       });
     });
     if (!response) {
-      showError("No answer from the extension background — reload the extension and try again.");
+      showError("No answer from the extension. Reload the extension and try again.");
       return;
     }
     if (response.doi) {
@@ -503,17 +529,17 @@ async function onCheckPageClick() {
       return;
     }
     if (response.error === "no-article-tab") {
-      showError("No article tab found. Open the article in a Chrome tab first, then tap “Check this page”.");
+      showError("No article tab found. Open the article in a tab first, then tap “Check this page”.");
     } else if (response.error === "no-scripting") {
-      showError("This browser doesn't support the script injection “Check this page” needs. Copy the DOI from the article page and paste it above.");
+      showError("This browser does not support “Check this page”. Copy the DOI from the article page and paste it above.");
     } else if (response.error === "inject-shared-failed" || response.error === "inject-extract-failed" || response.error === "no-permission") {
       const detail = response.detail ? ` Chrome said: ${response.detail}` : "";
-      showError(`Chrome couldn't read that tab${response.host ? ` (${response.host})` : ""}.${detail} Try reloading the article tab, then click the extension icon while you're on that tab and tap “Check this page” again. If it still fails, copy the DOI from the page and paste it above.`);
+      showError(`Chrome could not read that tab${response.host ? ` (${response.host})` : ""}.${detail} Reload the article tab and try again. If it still fails, copy the DOI and paste it above.`);
     } else if (response.error) {
       const detail = response.detail ? ` Chrome said: ${response.detail}` : "";
-      showError(`Couldn't read this page.${detail} Copy the DOI from the article page and paste it above.`);
+      showError(`Could not read this page.${detail} Copy the DOI and paste it above.`);
     } else {
-      showError(`No DOI found on this page${response.host ? ` (${response.host})` : ""}. It may not be an article page, or it may not carry a DOI tag. Copy the DOI from the page and paste it above.`);
+      showError(`No DOI found on this page${response.host ? ` (${response.host})` : ""}. Copy the DOI from the page and paste it above.`);
     }
   } finally {
     setLoading(false);
@@ -521,22 +547,55 @@ async function onCheckPageClick() {
 }
 
 lookupBtn.addEventListener("click", onLookupClick);
-if (lookupLinkBtn) lookupLinkBtn.addEventListener("click", onLookupLinkClick);
 if (lookupManualBtn) lookupManualBtn.addEventListener("click", onLookupManualClick);
 if (checkPageBtn) checkPageBtn.addEventListener("click", onCheckPageClick);
 inputEl.addEventListener("keydown", (event) => {
   if (event.key === "Enter") onLookupClick();
 });
-if (inputLinkEl) inputLinkEl.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") onLookupLinkClick();
-});
+
+// ---------- "Open in a full tab" ----------
+// BUG reported 27 Nov 2026: the button was still shown when the page
+// was ALREADY open as a full tab, and clicking it opened ANOTHER new
+// tab. Fix, two layers:
+//  1. Hide the button in a full tab. Detection: the ?view=fulltab
+//     marker in the URL (the button opens sidepanel.html?view=fulltab),
+//     plus chrome.tabs.getCurrent as a backup — it returns the tab in
+//     a full tab and undefined in the side panel, so a sidepanel.html
+//     tab opened directly (no marker) is still caught.
+//  2. The click handler itself refuses to open anything when the
+//     page is already a full tab, so even a stray click can never
+//     open a second tab.
+// The button opens exactly ONE tab, via chrome.tabs.create (the
+// "tabs" permission is in the manifest); window.open is only the
+// fallback when chrome.tabs is unavailable.
+function hideOpenTabButtonIfFullTab() {
+  if (!openTabBtn) return;
+  if (isFullTabUrl(window.location.href)) {
+    openTabBtn.hidden = true;
+    return;
+  }
+  if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.getCurrent) {
+    try {
+      chrome.tabs.getCurrent((tab) => {
+        if (tab && tab.id !== undefined) openTabBtn.hidden = true;
+      });
+    } catch (err) { /* side panel: leave the button visible */ }
+  }
+}
+hideOpenTabButtonIfFullTab();
 
 if (openTabBtn) {
   openTabBtn.addEventListener("click", () => {
-    const url = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL)
+    if (isFullTabUrl(window.location.href)) return; // already a full tab: do nothing
+    const base = (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.getURL)
       ? chrome.runtime.getURL("sidepanel.html")
       : "sidepanel.html";
-    window.open(url, "_blank");
+    const url = buildFullTabUrl(base);
+    if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.create) {
+      chrome.tabs.create({ url });
+    } else {
+      window.open(url, "_blank");
+    }
   });
 }
 
@@ -591,34 +650,34 @@ function refreshImportStatus() {
     const expiry = DATA.nextJcrExpiry(meta.importedAt || undefined);
     if (meta.jcrRows) {
       const editions = meta.jcrFiles.map((f) => `${f.fileName} (${f.editionYear || "year not set"}, ${f.rows} rows)`).join("; ");
-      jcrStatusEl.textContent = `JCR data: ${meta.jcrRows} journal-year rows stored. Files: ${editions}. Uploaded ${meta.importedAt ? new Date(meta.importedAt).toLocaleDateString() : "—"}. Current until the next JCR release (about ${expiry}) — re-import after that.`;
+      jcrStatusEl.textContent = `JCR data: ${meta.jcrRows} rows. ${editions}. Uploaded ${meta.importedAt ? new Date(meta.importedAt).toLocaleDateString() : "—"}. Valid until the next JCR release (about ${expiry}).`;
       jcrStatusEl.classList.remove("error");
     } else {
-      jcrStatusEl.textContent = "JCR data: nothing imported yet — no quartile or Impact Factor can be shown until you import a file.";
+      jcrStatusEl.textContent = "No JCR data imported yet.";
     }
     if (meta.sjrRows) {
-      sjrStatusEl.textContent = `SJR data: ${meta.sjrRows} journal-year rows stored (fallback only — never shown as JCR). Files: ${meta.sjrFiles.map((f) => f.fileName).join(", ")}.`;
+      sjrStatusEl.textContent = `SJR data: ${meta.sjrRows} rows (fallback only, never shown as JCR).`;
     } else {
-      sjrStatusEl.textContent = "SJR data: nothing imported yet.";
+      sjrStatusEl.textContent = "No SJR data imported yet.";
     }
     if (meta.mjlRows) {
-      mjlStatusEl.textContent = `WoS journal list: ${meta.mjlRows} journals stored (for category W / X). Files: ${meta.mjlFiles.map((f) => f.fileName).join(", ")}.`;
+      mjlStatusEl.textContent = `WoS list: ${meta.mjlRows} journals stored.`;
     } else {
-      mjlStatusEl.textContent = "WoS journal list: nothing imported yet.";
+      mjlStatusEl.textContent = "No WoS list imported yet.";
     }
   }).catch(() => { /* status stays as the default text */ });
 }
 
 jcrFileEl.addEventListener("change", () => {
-  jcrFileNameEl.textContent = fileNameOf(jcrFileEl) || "No file chosen yet.";
+  jcrFileNameEl.textContent = fileNameOf(jcrFileEl) || "No file chosen.";
   jcrImportBtn.disabled = !jcrFileEl.files.length;
 });
 sjrFileEl.addEventListener("change", () => {
-  sjrFileNameEl.textContent = fileNameOf(sjrFileEl) || "No file chosen yet.";
+  sjrFileNameEl.textContent = fileNameOf(sjrFileEl) || "No file chosen.";
   sjrImportBtn.disabled = !sjrFileEl.files.length;
 });
 mjlFileEl.addEventListener("change", () => {
-  mjlFileNameEl.textContent = fileNameOf(mjlFileEl) || "No file chosen yet.";
+  mjlFileNameEl.textContent = fileNameOf(mjlFileEl) || "No file chosen.";
   mjlImportBtn.disabled = !mjlFileEl.files.length;
 });
 
@@ -642,8 +701,8 @@ jcrImportBtn.addEventListener("click", async () => {
       parsed.warnings.forEach((w) => warnings.push(`${file.name}: ${w}`));
     }
     jcrStatusEl.textContent = total
-      ? `Imported ${total} journal-year rows from ${files.length} file(s) for data year ${editionYear} (${skipped} rows skipped). ${warnings.length ? "Warnings: " + warnings.join(" ") : ""} Check the numbers against the JCR export before relying on them — this importer has not yet been tested against a real JCR file.`
-      : `Nothing imported — no usable rows found. ${warnings.join(" ")} Check that the file is a JCR export (CSV or Excel) with ISSN, quartile and Impact Factor columns.`;
+      ? `Imported ${total} rows for data year ${editionYear} (${skipped} skipped). ${warnings.length ? "Warnings: " + warnings.join(" ") : ""} Check the numbers against the JCR export. This importer has not yet been tested against a real JCR file.`
+      : `Nothing imported, no usable rows found. ${warnings.join(" ")} Check the file is a JCR export with ISSN, quartile and Impact Factor columns.`;
     if (!total) jcrStatusEl.classList.add("error"); else jcrStatusEl.classList.remove("error");
   } catch (err) {
     jcrStatusEl.textContent = `Import failed: ${err.message}`;
@@ -673,8 +732,8 @@ sjrImportBtn.addEventListener("click", async () => {
       parsed.warnings.forEach((w) => warnings.push(`${file.name}: ${w}`));
     }
     sjrStatusEl.textContent = total
-      ? `Imported ${total} SJR journal-year rows (${skipped} skipped). These are fallback only — every SJR value is labelled “SJR quartile — fallback, NOT JCR”. ${warnings.join(" ")}`
-      : `Nothing imported. ${warnings.join(" ")} Check that the file is an SJR CSV from scimagojr.com with ISSN and SJR Best Quartile columns.`;
+      ? `Imported ${total} SJR rows (${skipped} skipped). Fallback only, always labelled NOT JCR. ${warnings.join(" ")}`
+      : `Nothing imported. ${warnings.join(" ")} Check the file is an SJR CSV with ISSN and SJR Best Quartile columns.`;
     if (!total) sjrStatusEl.classList.add("error"); else sjrStatusEl.classList.remove("error");
   } catch (err) {
     sjrStatusEl.textContent = `Import failed: ${err.message}`;
@@ -704,8 +763,8 @@ mjlImportBtn.addEventListener("click", async () => {
       parsed.warnings.forEach((w) => warnings.push(`${file.name}: ${w}`));
     }
     mjlStatusEl.textContent = total
-      ? `Imported ${total} journals from the WoS journal list (${skipped} skipped). Category W = SCIE/SSCI/AHCI, X = ESCI (Emerging). ${warnings.join(" ")}`
-      : `Nothing imported. ${warnings.join(" ")} Check that the file is a Master Journal List export with an index column (SCIE / SSCI / AHCI / ESCI).`;
+      ? `Imported ${total} journals. W = SCIE/SSCI/AHCI, X = ESCI (Emerging). ${warnings.join(" ")}`
+      : `Nothing imported. ${warnings.join(" ")} Check the file is a Master Journal List export with an index column (SCIE / SSCI / AHCI / ESCI).`;
     if (!total) mjlStatusEl.classList.add("error"); else mjlStatusEl.classList.remove("error");
   } catch (err) {
     mjlStatusEl.textContent = `Import failed: ${err.message}`;
@@ -717,13 +776,13 @@ mjlImportBtn.addEventListener("click", async () => {
 });
 
 clearDataBtn.addEventListener("click", async () => {
-  if (!window.confirm("Clear all imported data? This deletes every imported JCR, SJR and WoS journal-list row from the extension. The files on your computer are not affected.")) return;
+  if (!window.confirm("Clear all imported data? This deletes every imported JCR, SJR and WoS row from the extension.")) return;
   try {
     await getStore().clear();
     refreshImportStatus();
-    jcrStatusEl.textContent = "JCR data: nothing imported yet — no quartile or Impact Factor can be shown until you import a file.";
-    sjrStatusEl.textContent = "SJR data: nothing imported yet.";
-    mjlStatusEl.textContent = "WoS journal list: nothing imported yet.";
+    jcrStatusEl.textContent = "No JCR data imported yet.";
+    sjrStatusEl.textContent = "No SJR data imported yet.";
+    mjlStatusEl.textContent = "No WoS list imported yet.";
   } catch (err) {
     jcrStatusEl.textContent = `Could not clear the data: ${err.message}`;
   }
@@ -735,7 +794,7 @@ let batchFileRows = null;
 
 batchFileEl.addEventListener("change", async () => {
   const file = batchFileEl.files && batchFileEl.files[0];
-  batchFileNameEl.textContent = file ? file.name : "No file chosen yet.";
+  batchFileNameEl.textContent = file ? file.name : "No file chosen.";
   batchRunBtn.disabled = !file;
   batchFileRows = null;
   if (!file) return;
@@ -744,8 +803,8 @@ batchFileEl.addEventListener("change", async () => {
     const parsed = DATA.parseArticleListText(text);
     batchFileRows = parsed.rows;
     batchStatusEl.textContent = parsed.rows.length
-      ? `${parsed.rows.length} article(s) found in ${file.name}. Press “Upload and check all articles” to look them all up.`
-      : `No articles found in ${file.name}. ${parsed.warnings.join(" ")} Check the columns: title, journal, year, DOI if known.`;
+      ? `${parsed.rows.length} article(s) in ${file.name}. Press “Upload and check all articles”.`
+      : `No articles found in ${file.name}. ${parsed.warnings.join(" ")} Check the columns: title, journal, year, DOI.`;
     batchStatusEl.classList.toggle("error", !parsed.rows.length);
   } catch (err) {
     batchStatusEl.textContent = `Could not read ${file.name}: ${err.message}`;
@@ -837,7 +896,7 @@ async function runBatch(rows) {
     await sleep(500); // polite pacing for the Crossref polite pool
   }
   batchProgressBarEl.style.width = "100%";
-  batchStatusEl.textContent = `Done: ${rows.length} article(s) checked, ${found} found in Crossref/OpenAlex, ${resolvedDoi} with a DOI. ${batchResults.filter((r) => r.rank && r.rank.source === "JCR").length} have JCR data, ${batchResults.filter((r) => r.rank && r.rank.source === "SJR").length} have only the SJR fallback, ${batchResults.filter((r) => !r.rank || r.rank.source === "none").length} have no ranking data yet. Press “Download results as CSV” to save them.`;
+  batchStatusEl.textContent = `Done: ${rows.length} checked, ${found} found, ${resolvedDoi} with a DOI. ${batchResults.filter((r) => r.rank && r.rank.source === "JCR").length} with JCR data, ${batchResults.filter((r) => r.rank && r.rank.source === "SJR").length} SJR fallback only, ${batchResults.filter((r) => !r.rank || r.rank.source === "none").length} with no ranking data.`;
   batchRunBtn.disabled = false;
   batchTestsetBtn.disabled = false;
   if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
@@ -869,7 +928,7 @@ batchTestsetBtn.addEventListener("click", async () => {
       seen.add(key);
       return true;
     });
-    batchStatusEl.textContent = `Naqqash test set loaded: ${parsed.rows.length} rows, ${unique.length} unique by title after removing Scholar duplicates (2 more are the same work with truncated titles — they collapse to the same DOI once checked). Running now.`;
+    batchStatusEl.textContent = `Naqqash test set loaded: ${parsed.rows.length} rows, ${unique.length} unique by title. Running now.`;
     batchFileRows = unique;
     await runBatch(unique);
   } catch (err) {

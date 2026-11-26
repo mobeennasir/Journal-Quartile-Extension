@@ -123,3 +123,47 @@ function parseDoiFromHtml(html) {
   m = head.match(/doi\.org\/(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)/i);
   return m ? m[1] : null;
 }
+
+// ---------- Full-tab detection ----------
+// The lookup page runs in two contexts: the Chrome side panel (not a
+// tab) and a full browser tab (opened by "Open in a full tab"). The
+// "Open in a full tab" button must only show in the side panel — in
+// a full tab it would open yet another tab, which is the bug reported
+// 27 Nov 2026. Two detections, both pure so the Node tests can check
+// them:
+//  1. URL marker: the button opens sidepanel.html?view=fulltab, so
+//     a full tab opened that way carries the marker.
+//  2. chrome.tabs.getCurrent (in popup.js): in a full tab it returns
+//     the tab; in the side panel it returns undefined, because the
+//     panel is not a tab. That covers a sidepanel.html tab opened
+//     directly, with no marker.
+function isFullTabUrl(urlString) {
+  if (!urlString) return false;
+  try {
+    const params = new URL(urlString, "https://example.invalid").searchParams;
+    return params.get("view") === "fulltab";
+  } catch (err) {
+    return false;
+  }
+}
+
+// The URL the "Open in a full tab" button opens: the same page with
+// the ?view=fulltab marker, so the new tab knows it is a full tab.
+// If the marker is already there, the URL is returned unchanged.
+function buildFullTabUrl(baseUrl) {
+  const url = String(baseUrl || "sidepanel.html");
+  if (isFullTabUrl(url)) return url;
+  return url + (url.indexOf("?") === -1 ? "?view=fulltab" : "&view=fulltab");
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    extractDoi: extractDoi,
+    doiFromSlug: doiFromSlug,
+    isBlockedPage: isBlockedPage,
+    extractDoiFromDocument: extractDoiFromDocument,
+    parseDoiFromHtml: parseDoiFromHtml,
+    isFullTabUrl: isFullTabUrl,
+    buildFullTabUrl: buildFullTabUrl,
+  };
+}

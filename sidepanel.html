@@ -12,46 +12,33 @@
       <img class="logo" src="icons/icon128.png" alt="" width="64" height="64">
       <div>
         <h1>Journal Quartile</h1>
-        <p class="tag">Phase 2 — quartile and Impact Factor for the year an article was published. JCR data comes from a file you import; SJR is only a labelled fallback.</p>
+        <p class="tag">Quartile and Impact Factor for the article's publication year.</p>
       </div>
     </header>
 
     <!-- ============ SINGLE ARTICLE ============ -->
     <section aria-labelledby="single-heading">
-      <h2 id="single-heading">Single article — look it up one at a time</h2>
-      <p class="section-desc">Pick how you want to find the article. All three ways end with the same result: the journal's quartile and Impact Factor for the article's own publication year.</p>
+      <h2 id="single-heading">Single article</h2>
 
       <div class="mode-tabs" role="tablist" aria-label="Ways to look up one article">
-        <button id="mode-doi" type="button" class="mode-tab active" role="tab" aria-selected="true">Lookup by DOI</button>
-        <button id="mode-link" type="button" class="mode-tab" role="tab" aria-selected="false">Lookup by article link</button>
+        <button id="mode-doi" type="button" class="mode-tab active" role="tab" aria-selected="true">DOI or article link</button>
         <button id="mode-manual" type="button" class="mode-tab" role="tab" aria-selected="false">Enter details manually</button>
       </div>
 
-      <!-- Mode 1: DOI -->
+      <!-- Mode 1: DOI or article link -->
       <div id="pane-doi" class="mode-pane">
-        <p class="mode-desc">Paste a DOI, for example <code>10.1038/nature14539</code>. The extension looks the article up in Crossref.</p>
-        <label for="input">DOI</label>
+        <p class="mode-desc">Bare DOI, doi.org link, or publisher article URL.</p>
+        <label for="input">DOI or article link</label>
         <div class="form-row">
-          <input id="input" type="text" placeholder="10.1038/nature14539" autocomplete="off" spellcheck="false">
+          <input id="input" type="text" placeholder="10.1038/nature14539 or https://www.nature.com/articles/s41598-026-62863-y" autocomplete="off" spellcheck="false">
           <button id="lookup" type="button">Look up</button>
         </div>
+        <button id="check-page" type="button" class="ghost">Check this page</button>
       </div>
 
-      <!-- Mode 2: article link -->
-      <div id="pane-link" class="mode-pane" hidden>
-        <p class="mode-desc">Paste any publisher article link, for example a nature.com or ScienceDirect link. The DOI is read from the article page itself.</p>
-        <label for="input-link">Article link</label>
-        <div class="form-row">
-          <input id="input-link" type="text" placeholder="https://www.nature.com/articles/s41598-026-62863-y" autocomplete="off" spellcheck="false">
-          <button id="lookup-link" type="button">Look up</button>
-        </div>
-        <button id="check-page" type="button" class="ghost">Check this page — read the DOI from the open article tab</button>
-        <p class="hint">Already on the article page? “Check this page” reads the DOI from the open tab — no page fetch, so a publisher bot check can't block it. Use it when a link is blocked.</p>
-      </div>
-
-      <!-- Mode 3: manual entry -->
+      <!-- Mode 2: manual entry -->
       <div id="pane-manual" class="mode-pane" hidden>
-        <p class="mode-desc">For old articles with no DOI or link. Type the title, journal and year and the extension searches Crossref for the article.</p>
+        <p class="mode-desc">No DOI or link? Title, journal and year.</p>
         <label for="manual-title">Article title</label>
         <input id="manual-title" type="text" placeholder="Rhizosphere engineering with plant growth-promoting microorganisms…" autocomplete="off" spellcheck="false">
         <label for="manual-journal">Journal name</label>
@@ -62,11 +49,11 @@
             <input id="manual-year" type="text" inputmode="numeric" placeholder="2021" autocomplete="off" spellcheck="false">
           </div>
           <div>
-            <label for="manual-doi">DOI, if known (optional)</label>
+            <label for="manual-doi">DOI (optional)</label>
             <input id="manual-doi" type="text" placeholder="10.3389/fsufs.2021.617157" autocomplete="off" spellcheck="false">
           </div>
         </div>
-        <label for="manual-issn">ISSN, if known (optional)</label>
+        <label for="manual-issn">ISSN (optional)</label>
         <input id="manual-issn" type="text" placeholder="2571-581X" autocomplete="off" spellcheck="false">
         <button id="lookup-manual" type="button" class="primary">Look up this article</button>
       </div>
@@ -77,12 +64,12 @@
 
     <!-- ============ BATCH UPLOAD ============ -->
     <section aria-labelledby="batch-heading">
-      <h2 id="batch-heading">Upload a list of articles (Excel / CSV)</h2>
-      <p class="section-desc">Upload a .csv or .xlsx file with one article per row. Columns it understands: <strong>title, journal, year, DOI if known, ISSN if known, volume/pages</strong>. A missing DOI is fine — each article is found by its title and journal. Returns one result row per article, with the quartile and Impact Factor for that article's own year. You can download the results as a CSV.</p>
+      <h2 id="batch-heading">Upload a list (Excel / CSV)</h2>
+      <p class="section-desc">One article per row. Columns: title, journal, year, DOI, ISSN.</p>
       <div class="batch-controls">
-        <label class="file-label" for="batch-file">Choose Excel or CSV file</label>
+        <label class="file-label" for="batch-file">Choose Excel / CSV</label>
         <input id="batch-file" type="file" accept=".csv,.xlsx,.xls" hidden>
-        <span id="batch-file-name" class="file-name">No file chosen yet.</span>
+        <span id="batch-file-name" class="file-name">No file chosen.</span>
       </div>
       <div class="button-row">
         <button id="batch-run" type="button" class="primary" disabled>Upload and check all articles</button>
@@ -105,10 +92,10 @@
 
     <!-- ============ JCR IMPORT ============ -->
     <section aria-labelledby="jcr-heading">
-      <h2 id="jcr-heading">Import JCR data (for quartile + Impact Factor)</h2>
-      <p class="section-desc">Upload your JCR export file (CSV or Excel). JCR is subscription-only, so the extension cannot fetch it itself — your uploaded file is the source. It is saved in the extension and reused for every lookup until the next JCR release (about June). One file per JCR edition; you can import several editions. <strong>Do not upload anyone else's login — only the export file.</strong></p>
+      <h2 id="jcr-heading">Import JCR data</h2>
+      <p class="section-desc">JCR export file (CSV or Excel). Saved until the next JCR release. Export file only, no login.</p>
       <label for="jcr-year">Data year this export covers</label>
-      <p class="hint">The year the numbers describe — not the year you downloaded it. A 2021 article needs the export that reports 2021 data.</p>
+      <p class="hint">The year the numbers describe.</p>
       <select id="jcr-year">
         <option value="2026">2026</option>
         <option value="2025" selected>2025</option>
@@ -126,46 +113,48 @@
         <option value="2013">2013</option>
       </select>
       <div class="batch-controls">
-        <label class="file-label" for="jcr-file">Choose JCR export file</label>
+        <label class="file-label" for="jcr-file">Choose JCR file</label>
         <input id="jcr-file" type="file" accept=".csv,.xlsx,.xls" multiple hidden>
-        <span id="jcr-file-name" class="file-name">No file chosen yet.</span>
+        <span id="jcr-file-name" class="file-name">No file chosen.</span>
       </div>
       <div class="button-row">
         <button id="jcr-import" type="button" class="primary" disabled>Import JCR file</button>
       </div>
-      <p id="jcr-status" class="status" aria-live="polite">JCR data: nothing imported yet — no quartile or Impact Factor can be shown until you import a file.</p>
+      <p id="jcr-status" class="status" aria-live="polite">No JCR data imported yet.</p>
 
-      <h3>Import SJR data (fallback quartile — NOT JCR)</h3>
-      <p class="section-desc">Optional. Upload an SJR CSV downloaded from scimagojr.com in your browser. It is used only when no JCR data exists for that journal and year, and every value from it is labelled “SJR quartile — fallback, NOT JCR”, so it is never mistaken for JCR.</p>
+      <h3>Import SJR data</h3>
+      <p class="section-desc">Optional. Fallback only, always labelled NOT JCR.</p>
       <div class="batch-controls">
-        <label class="file-label" for="sjr-file">Choose SJR CSV file</label>
+        <label class="file-label" for="sjr-file">Choose SJR file</label>
         <input id="sjr-file" type="file" accept=".csv" hidden>
-        <span id="sjr-file-name" class="file-name">No file chosen yet.</span>
+        <span id="sjr-file-name" class="file-name">No file chosen.</span>
       </div>
       <div class="button-row">
         <button id="sjr-import" type="button" class="primary" disabled>Import SJR file</button>
       </div>
-      <p id="sjr-status" class="status" aria-live="polite">SJR data: nothing imported yet.</p>
+      <p id="sjr-status" class="status" aria-live="polite">No SJR data imported yet.</p>
 
-      <h3>Import WoS journal list (for category W / X)</h3>
-      <p class="section-desc">Optional. Upload a Web of Science Master Journal List export (CSV). It gives the WoS category: W = SCIE, SSCI or AHCI; X = ESCI (Emerging). Without it, the category shows as unknown. The category is the journal's current indexing, not the publication year's.</p>
+      <h3>Import WoS journal list</h3>
+      <p class="section-desc">Optional. Category W (SCIE/SSCI/AHCI) or X (ESCI).</p>
       <div class="batch-controls">
-        <label class="file-label" for="mjl-file">Choose WoS journal list file</label>
+        <label class="file-label" for="mjl-file">Choose WoS file</label>
         <input id="mjl-file" type="file" accept=".csv,.xlsx,.xls" hidden>
-        <span id="mjl-file-name" class="file-name">No file chosen yet.</span>
+        <span id="mjl-file-name" class="file-name">No file chosen.</span>
       </div>
       <div class="button-row">
         <button id="mjl-import" type="button" class="primary" disabled>Import WoS journal list</button>
       </div>
-      <p id="mjl-status" class="status" aria-live="polite">WoS journal list: nothing imported yet.</p>
+      <p id="mjl-status" class="status" aria-live="polite">No WoS list imported yet.</p>
 
       <button id="clear-data" type="button" class="ghost danger">Clear all imported data</button>
     </section>
 
-    <footer class="foot">Sources: Crossref first, OpenAlex fallback. Quartile / Impact Factor only from data you import (JCR) or, labelled, from SJR. No data is sent anywhere except the article lookup itself.</footer>
+    <footer class="foot">Sources: Crossref, OpenAlex fallback. Rankings only from imported JCR or labelled SJR data.</footer>
+    <p id="storage-note" class="hint" hidden></p>
     <button id="open-tab" type="button" class="ghost">Open in a full tab</button>
   </main>
   <script src="shared.js"></script>
+  <script src="net.js"></script>
   <script src="jcr.js"></script>
   <script src="xlsx.js"></script>
   <script src="popup.js"></script>

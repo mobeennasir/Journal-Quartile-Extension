@@ -1,4 +1,4 @@
-// Phase 1 spike: background service worker.
+// Phase 2: background service worker.
 // Two jobs:
 //  1. Fetch an article page and extract its DOI from the page
 //     metadata (generic path, any publisher — see shared.js).
