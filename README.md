@@ -93,26 +93,34 @@ no bot check can apply. It needs two extra permissions:
 `scripting` (inject the reader) and `tabs` (find the article
 tab when the lookup page itself is open as a full tab).
 
-**Fixed 26 Nov 2026 — why it failed on ScienceDirect the first
-time.** The v4 build made ONE `chrome.scripting.executeScript`
-call with BOTH `files: ["shared.js"]` AND a `func`. Per the
-scripting API spec exactly one of `files` and `func` may be
-specified, so that call was invalid and the extractor never
-ran — which is why it reported "Chrome wouldn't let the
-extension read that tab" even though the user WAS on the
-article tab with the panel open. The fix is two separate
-calls: (1) inject `shared.js` alone, await it, (2) then run
-the extractor in its own call (the func is self-contained and
-only calls the global step 1 defined). Injection now works
-via the manifest's host permissions for the publisher
-origins (e.g. `*.sciencedirect.com`) — it does NOT rely on
-an `activeTab` grant alone. Tab picking is also explicit:
-when the side panel is open the active tab is the article
-tab behind it; when the lookup page is open as a full tab,
-the worker falls back to the most recently used http(s) tab.
-If injection still fails, the UI now shows Chrome's real
-error message instead of a generic one. The blocked-fetch
-message also points at this button.
+**Fixed twice — why it failed on ScienceDirect.** The v4 build
+made ONE `chrome.scripting.executeScript` call with BOTH
+`files: ["shared.js"]` AND a `func`. Per the scripting API spec
+exactly one of `files` and `func` may be specified, so that call
+was invalid and the extractor never ran — which is why it
+reported "Chrome wouldn't let the extension read that tab"
+even though the user WAS on the article tab with the panel
+open. The first fix (26 Nov 2026) split it into two calls:
+(1) inject `shared.js` alone, (2) then run the extractor.
+That still failed on 27 Nov 2026 — the user reported pasting
+the ScienceDirect link (background fetch) worked, but "Check
+this page" still did nothing. Root cause: top-level `const` /
+`function` declarations in an injected file do NOT reliably
+persist across separate `executeScript` calls in the tab's
+isolated world, so step 2's extractor (or the `const
+DOI_PATTERN` it closed over) could be missing and it silently
+returned null. The current fix is ONE call with ONLY `func`,
+and the func is FULLY SELF-CONTAINED — the whole DOI
+extraction lives inside it, nothing from a previous call is
+needed. Injection works via the manifest's host permissions
+for the publisher origins (e.g. `*.sciencedirect.com`) — it
+does NOT rely on an `activeTab` grant alone. Tab picking is
+also explicit: when the side panel is open the active tab is
+the article tab behind it; when the lookup page is open as a
+full tab, the worker falls back to the most recently used
+http(s) tab. If injection still fails, the UI now shows
+Chrome's real error message instead of a generic one. The
+blocked-fetch message also points at this button.
 
 ## Side panel (v3 — the popup no longer closes on outside clicks)
 
@@ -142,15 +150,16 @@ container with the input and Lookup button side by side and the
 result rows in a wider label/value grid — no narrow left column
 with empty space on the right.
 
-## Logo (solid background, toolbar-visible)
+## Logo (transparent, deep green + gold, no background)
 
 `icons/icon128.png`, `icons/icon48.png`, `icons/icon16.png` —
-same concept (journal + ascending quartile bars), now on a solid
-deep navy (`#12324f`) rounded square so it pops on a light
-toolbar like other extension icons: pale teal journal document
-with bold deep-teal ascending bars (four bars at 128/48px,
-three thicker bars at 16px so they stay legible), no text.
-Wired into `manifest.json` under `icons` and
+same concept (journal + ascending quartile bars), transparent,
+no background square: the document itself is solid deep green
+(`#166534`) with thick saturated gold ascending bars (`#eab308`),
+so it reads on a light toolbar like the other transparent extension
+icons (four bars at 128/48px, three thicker bars at 16px —
+dedicated bold redraw, not a downscale — so they stay distinct).
+No text. Wired into `manifest.json` under `icons` and
 `action.default_icon`, and shown in the panel header (64px,
 72px in the wide full-tab view).
 
@@ -235,9 +244,9 @@ Wired into `manifest.json` under `icons` and
 - `background.js` — service worker: fetches an article page
   and returns the DOI parsed from its metadata (blocked pages
   reported as blocked, not as "no DOI"), reads the DOI from the
-  open article tab's DOM for "Check this page" (injects
-  shared.js in one call, then runs the DOM extractor in a
-  second call — exactly one of files/func per call, host
+  open article tab's DOM for "Check this page" (ONE
+  executeScript call with a fully self-contained extractor
+  func — no `files`, no cross-call persistence to fail; host
   permission, no fetch, no storage; real injection errors are
   surfaced with Chrome's message), and opens the side panel on
   icon click. No storage, page HTML is discarded after parsing.

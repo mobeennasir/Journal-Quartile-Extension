@@ -16,15 +16,29 @@ importScripts("shared.js");
 // tab the user is already on. The page is already loaded by the user,
 // so no fetch happens and a publisher bot check cannot apply.
 //
-// ROOT CAUSE of the v4 failure (26 Nov 2026, ScienceDirect page):
-// v4 made ONE chrome.scripting.executeScript call with BOTH
-// files: ["shared.js"] AND func: () => extractDoiFromDocument(...).
-// Per the scripting API spec, exactly one of `files` and `func`
-// must be specified — a call with both is invalid, so the extractor
-// never ran and the call failed, surfacing as the generic
-// "Chrome wouldn't let the extension read that tab" message even
-// though the user WAS on the article tab. The fix is two separate
-// calls (below), and the real error is surfaced, not hidden.
+// ROOT CAUSE of the v4/v5 failures (26–27 Nov 2026, ScienceDirect):
+// v4 made ONE executeScript call with BOTH files: ["shared.js"] AND
+// func — invalid, exactly one of `files`/`func` may be specified, so
+// the extractor never ran. The v5 "fix" split it into two calls:
+// step 1 injected shared.js, step 2 called the global it defined.
+// That is fragile too: top-level `const`/`function` declarations in
+// an injected file do NOT reliably persist across separate
+// executeScript calls in the tab's isolated world — step 2's
+// `typeof extractDoiFromDocument === "function"` can be false (or
+// the call can throw because the `const DOI_PATTERN` it closes over
+// is gone), so it silently returned null — "No DOI found on this
+// page" — even though step 1 "succeeded" and the DOI was on the
+// page. The user confirmed this on 27 Nov 2026: pasting the
+// ScienceDirect link (background fetch) worked, "Check this page"
+// still did nothing.
+//
+// The fix below is ONE executeScript call with ONLY `func`, and the
+// func is FULLY SELF-CONTAINED: the whole DOI extraction lives
+// inside it (same priority order as shared.js extractDoiFromDocument
+// — citation_doi, DC.Identifier, JSON-LD, og:url, canonical, head
+// doi.org link). Nothing is injected by a previous call and nothing
+// is read from any closure, so there is no cross-call persistence
+// to fail.
 //
 // Permission path: this does NOT rely on activeTab alone. The
 // manifest grants host_permissions for the publisher origins
@@ -65,33 +79,63 @@ async function checkThisPage(sendResponse) {
     let host = "";
     try { host = new URL(tab.url).hostname; } catch (err) { /* ignore */ }
 
-    // Step 1: inject shared.js alone. Exactly one of `files`/`func`
-    // per call — see the root-cause note above. This defines
-    // extractDoiFromDocument in the tab's isolated world.
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ["shared.js"],
-      });
-    } catch (err) {
-      sendResponse({
-        doi: null, error: "inject-shared-failed", host,
-        detail: String(err && err.message || err),
-      });
-      return;
-    }
-
-    // Step 2: run the extractor in a separate call. The func is
-    // self-contained (it only calls the global that step 1 defined
-    // — executeScript serialises the func, so it cannot see any
-    // closure from this service worker) and returns the DOI or null.
+    // ONE executeScript call, `func` only — no `files`. The func is
+    // fully self-contained (see the root-cause note above): it
+    // defines everything it needs inside itself and only touches
+    // the page's own `document`. It returns the DOI string or null.
     let results;
     try {
       results = await chrome.scripting.executeScript({
         target: { tabId: tab.id },
         func: () => {
-          if (typeof extractDoiFromDocument !== "function") return null;
-          try { return extractDoiFromDocument(document); } catch (e) { return null; }
+          try {
+            const DOI_PATTERN = /10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i;
+            const pick = (value) => {
+              if (!value) return null;
+              const d = String(value).match(DOI_PATTERN);
+              return d ? d[0] : null;
+            };
+            const metaContent = (selector) => {
+              const el = document.querySelector(selector);
+              return el ? el.getAttribute("content") : null;
+            };
+            let doi = pick(metaContent('meta[name="citation_doi"]'))
+              || pick(metaContent('meta[property="citation_doi"]'))
+              || pick(metaContent('meta[name="DC.Identifier"]'))
+              || pick(metaContent('meta[name="dc.identifier"]'));
+            if (doi) return doi;
+            // JSON-LD blocks: "doi", or an "@id" pointing at doi.org.
+            const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+            for (const script of scripts) {
+              try {
+                const data = JSON.parse(script.textContent || "");
+                const candidates = Array.isArray(data) ? data : [data];
+                for (const item of candidates) {
+                  if (!item || typeof item !== "object") continue;
+                  doi = pick(item.doi) || pick(item["@id"]);
+                  if (doi) return doi;
+                }
+              } catch (e) { /* not JSON — skip this block */ }
+            }
+            doi = pick(metaContent('meta[property="og:url"]'));
+            if (doi) return doi;
+            const canonical = document.querySelector('link[rel="canonical"]');
+            if (canonical) {
+              doi = pick(canonical.getAttribute("href"));
+              if (doi) return doi;
+            }
+            // A doi.org link inside <head> only — references live
+            // in the body, so scanning the whole page would risk a
+            // cited DOI.
+            const headLinks = document.head ? document.head.querySelectorAll("a[href]") : [];
+            for (const a of headLinks) {
+              doi = pick(a.getAttribute("href"));
+              if (doi) return doi;
+            }
+            return null;
+          } catch (e) {
+            return null;
+          }
         },
       });
     } catch (err) {
