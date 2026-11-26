@@ -1,1 +1,62 @@
-{"action":{"default_icon":{"128":"icons/icon128.png","16":"icons/icon16.png","48":"icons/icon48.png"},"default_title":"Journal Quartile Extension — Phase 1 Spike"},"background":{"service_worker":"background.js"},"description":"Phase 1 spike (throwaway proof-of-concept): look up an article by DOI or any publisher article link via Crossref, with OpenAlex fallback. The DOI is read from the article page's own metadata (citation_doi first); the side panel stays open while you browse. No quartile, no Impact Factor, no category yet — those come later.","host_permissions":["https://api.crossref.org/*","https://api.openalex.org/*","https://*.nature.com/*","https://nature.com/*","https://*.sciencedirect.com/*","https://sciencedirect.com/*","https://*.elsevier.com/*","https://*.springer.com/*","https://*.link.springer.com/*","https://*.onlinelibrary.wiley.com/*","https://*.tandfonline.com/*","https://*.mdpi.com/*","https://*.frontiersin.org/*","https://*.nih.gov/*","https://*.europepmc.org/*","https://*.oup.com/*","https://*.sagepub.com/*","https://*.cambridge.org/*","https://*.acs.org/*","https://*.rsc.org/*","https://*.iop.org/*","https://*.science.org/*","https://*.cell.com/*","https://*.thelancet.com/*","https://*.bmj.com/*","https://*.plos.org/*","https://*.biorxiv.org/*","https://*.medrxiv.org/*"],"icons":{"128":"icons/icon128.png","16":"icons/icon16.png","48":"icons/icon48.png"},"manifest_version":3,"name":"Journal Quartile Extension — Phase 1 Spike","permissions":["storage","activeTab","sidePanel","scripting","tabs"],"side_panel":{"default_path":"sidepanel.html"},"version":"0.2.0"}
+{
+  "action": {
+    "default_icon": {
+      "128": "icons/icon128.png",
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "Journal Quartile Extension \u2014 Phase 2"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "description": "Phase 2: look up an article by DOI, article link or manual entry via Crossref (OpenAlex fallback), then show its journal quartile and Impact Factor for the publication year from JCR data you import, with a labelled SJR fallback and WoS category W/X. Batch upload of Excel/CSV article lists with CSV export.",
+  "host_permissions": [
+    "https://api.crossref.org/*",
+    "https://api.openalex.org/*",
+    "https://*.nature.com/*",
+    "https://nature.com/*",
+    "https://*.sciencedirect.com/*",
+    "https://sciencedirect.com/*",
+    "https://*.elsevier.com/*",
+    "https://*.springer.com/*",
+    "https://*.link.springer.com/*",
+    "https://*.onlinelibrary.wiley.com/*",
+    "https://*.tandfonline.com/*",
+    "https://*.mdpi.com/*",
+    "https://*.frontiersin.org/*",
+    "https://*.nih.gov/*",
+    "https://*.europepmc.org/*",
+    "https://*.oup.com/*",
+    "https://*.sagepub.com/*",
+    "https://*.cambridge.org/*",
+    "https://*.acs.org/*",
+    "https://*.rsc.org/*",
+    "https://*.iop.org/*",
+    "https://*.science.org/*",
+    "https://*.cell.com/*",
+    "https://*.thelancet.com/*",
+    "https://*.bmj.com/*",
+    "https://*.plos.org/*",
+    "https://*.biorxiv.org/*",
+    "https://*.medrxiv.org/*"
+  ],
+  "icons": {
+    "128": "icons/icon128.png",
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png"
+  },
+  "manifest_version": 3,
+  "name": "Journal Quartile Extension \u2014 Phase 2",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "sidePanel",
+    "scripting",
+    "tabs"
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "version": "0.3.0"
+}
