@@ -1,15 +1,17 @@
 * { box-sizing: border-box; }
 body {
-  width: 420px;
-  max-width: 100%;
   margin: 0;
+  min-height: 100vh;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
   line-height: 1.45;
   color: #1b2a3a;
   background: #f7f9fb;
 }
-main { padding: 14px 16px 12px; }
+/* Narrow default = the side panel look (~420px). The page is centred
+   in its container, so a wide viewport (full tab) no longer leaves a
+   narrow column stuck to the left with empty space on the right. */
+main { max-width: 452px; margin: 0 auto; padding: 14px 16px 12px; }
 
 /* Header */
 .brand { display: flex; gap: 10px; align-items: center; margin-bottom: 13px; }
@@ -47,6 +49,7 @@ input::placeholder { color: #8a97a5; }
 }
 #lookup:hover { background: #0b5e57; }
 #lookup:disabled { opacity: 0.65; cursor: wait; }
+.form-row { display: block; }
 .hint { margin: 7px 0 0; color: #5b6b7a; font-size: 12px; }
 
 /* Status / errors */
@@ -103,3 +106,38 @@ input::placeholder { color: #8a97a5; }
   cursor: pointer;
 }
 .ghost:hover { background: #e0f2ef; }
+#check-page { margin-top: 10px; }
+
+/* Wide view: full browser tab. Same page, same markup — the layout
+   opens up instead of staying a 420px column on the left. */
+@media (min-width: 700px) {
+  body { font-size: 15px; }
+  main { max-width: 920px; padding: 28px 32px 24px; }
+
+  /* Header: slightly larger logo and title. */
+  .brand { gap: 14px; margin-bottom: 20px; }
+  .logo { width: 52px; height: 52px; }
+  h1 { font-size: 22px; }
+  .tag { font-size: 13px; }
+
+  /* Form: input and Lookup sit side by side, using the full width. */
+  .form-row { display: flex; gap: 10px; align-items: stretch; margin-top: 4px; }
+  .form-row input { flex: 1; min-width: 0; padding: 11px 13px; font-size: 15px; }
+  .form-row #lookup { width: auto; min-width: 170px; margin-top: 0; padding: 11px 22px; font-size: 15px; flex-shrink: 0; }
+  .hint { font-size: 13px; margin-top: 10px; }
+
+  /* Result card: roomier, labels in a wider left column so values
+     stop wrapping mid-word. */
+  .result { margin-top: 18px; padding: 18px 20px; border-radius: 12px; }
+  .result dl { grid-template-columns: 190px 1fr; row-gap: 10px; column-gap: 16px; font-size: 14px; }
+  .result dt { font-size: 13px; padding-top: 2px; }
+  .result dd:nth-of-type(1) { font-size: 18px; line-height: 1.4; }
+  .source { font-size: 12px; margin-bottom: 12px; }
+  .status { font-size: 14px; }
+  .foot { margin-top: 18px; font-size: 12.5px; }
+  .ghost { font-size: 13px; padding: 8px 16px; }
+}
+
+@media (min-width: 1100px) {
+  main { max-width: 960px; }
+}

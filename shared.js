@@ -35,6 +35,56 @@ function isBlockedPage(html, status) {
   return /are you a robot|captcha|access denied|verify you are human|cloudflare|please verify|bot detection|unusual traffic/i.test(html.slice(0, 20000));
 }
 
+// DOM version of parseDoiFromHtml — same priority order, for the
+// "Check this page" path. Runs inside the already-loaded article
+// tab (shared.js is injected there by the background worker), so it
+// reads the live DOM and no fetch — and no bot check — can apply.
+// Pure DOM reads, no network, no writes.
+function extractDoiFromDocument(doc) {
+  if (!doc) return null;
+  const pick = (value) => {
+    if (!value) return null;
+    const d = String(value).match(DOI_PATTERN);
+    return d ? d[0] : null;
+  };
+  const metaContent = (selector) => {
+    const el = doc.querySelector(selector);
+    return el ? el.getAttribute("content") : null;
+  };
+  let doi = pick(metaContent('meta[name="citation_doi"]'))
+    || pick(metaContent('meta[property="citation_doi"]'))
+    || pick(metaContent('meta[name="DC.Identifier"]'))
+    || pick(metaContent('meta[name="dc.identifier"]'));
+  if (doi) return doi;
+  // JSON-LD blocks: "doi", or an "@id" pointing at doi.org.
+  const scripts = doc.querySelectorAll('script[type="application/ld+json"]');
+  for (const script of scripts) {
+    try {
+      const data = JSON.parse(script.textContent || "");
+      const candidates = Array.isArray(data) ? data : [data];
+      for (const item of candidates) {
+        if (!item || typeof item !== "object") continue;
+        doi = pick(item.doi) || pick(item["@id"]);
+        if (doi) return doi;
+      }
+    } catch (err) { /* not JSON — skip this block */ }
+  }
+  doi = pick(metaContent('meta[property="og:url"]'));
+  if (doi) return doi;
+  const canonical = doc.querySelector('link[rel="canonical"]');
+  if (canonical) {
+    doi = pick(canonical.getAttribute("href"));
+    if (doi) return doi;
+  }
+  // A doi.org link inside <head> only — references live in the body.
+  const headLinks = doc.head ? doc.head.querySelectorAll("a[href]") : [];
+  for (const a of headLinks) {
+    doi = pick(a.getAttribute("href"));
+    if (doi) return doi;
+  }
+  return null;
+}
+
 // Parse a DOI out of an article page's HTML — the generic mechanism
 // that works for any publisher. Order:
 //  1. <meta name="citation_doi"> (either attribute order, name or

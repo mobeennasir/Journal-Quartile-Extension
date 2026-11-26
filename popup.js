@@ -13,6 +13,7 @@ const lookupBtn = document.getElementById("lookup");
 const statusEl = document.getElementById("status");
 const resultEl = document.getElementById("result");
 const openTabBtn = document.getElementById("open-tab");
+const checkPageBtn = document.getElementById("check-page");
 
 // Resolve a publisher URL that contains no literal DOI.
 // MAIN mechanism (generic, any publisher): fetch the article page
@@ -246,7 +247,7 @@ async function onLookupClick() {
           showError(
             `That publisher (${resolved.host || "this site"}) blocked the automatic page read` +
             (resolved.status ? ` (HTTP ${resolved.status}, bot check)` : " (bot check)") +
-            `. The DOI could not be read from the page. Open the article in Chrome and copy the DOI from the page itself, then paste the DOI here.`
+            `. The DOI could not be read from the page. If the article is open in a tab, tap “Check this page” — it reads the DOI from the open page instead. Otherwise, open the article in Chrome and copy the DOI from the page itself, then paste the DOI here.`
           );
           return;
         }
@@ -263,7 +264,52 @@ async function onLookupClick() {
   lookup(doi);
 }
 
+// "Check this page": the user is already on the article page, so the
+// DOI is read from that tab's live DOM via the background worker —
+// no re-fetch, so a publisher bot check cannot apply. The normal
+// Crossref lookup then runs on the DOI that comes back.
+async function onCheckPageClick() {
+  setLoading(true, "Reading this page …");
+  try {
+    if (typeof chrome === "undefined" || !chrome.runtime || !chrome.runtime.sendMessage) {
+      showError("“Check this page” needs the extension running in Chrome — paste the DOI or link above instead.");
+      return;
+    }
+    const response = await new Promise((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 20000);
+      chrome.runtime.sendMessage({ type: "checkThisPage" }, (res) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(res || null);
+      });
+    });
+    if (!response) {
+      showError("No answer from the extension background — reload the extension and try again.");
+      return;
+    }
+    if (response.doi) {
+      inputEl.value = response.doi;
+      await lookup(response.doi);
+      return;
+    }
+    if (response.error === "no-article-tab") {
+      showError("No article tab found. Open the article in a Chrome tab first, then tap “Check this page”.");
+    } else if (response.error === "no-permission") {
+      showError("Chrome wouldn't let the extension read that tab. Click the extension icon while you're on the article tab, then tap “Check this page” again.");
+    } else if (response.error) {
+      showError("Couldn't read this page. Copy the DOI from the article page and paste it above.");
+    } else {
+      showError(`No DOI found on this page${response.host ? ` (${response.host})` : ""}. It may not be an article page, or it may not carry a DOI tag. Copy the DOI from the page and paste it above.`);
+    }
+  } finally {
+    setLoading(false);
+  }
+}
+
 lookupBtn.addEventListener("click", onLookupClick);
+if (checkPageBtn) checkPageBtn.addEventListener("click", onCheckPageClick);
 inputEl.addEventListener("keydown", (event) => {
   if (event.key === "Enter") onLookupClick();
 });

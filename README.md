@@ -79,6 +79,25 @@ IHub" for `S09445013` (a real PII is longer, e.g.
 the full PII the generic metadata path above is what resolves it.
 If you have the full link, paste that instead.
 
+## "Check this page" — the answer for blocked publishers
+
+The background fetch above can still be blocked (ScienceDirect,
+MDPI). The escape hatch is **“Check this page”**: open the
+article in a Chrome tab, click the extension icon, tap the
+button. The background worker reads the DOI from that tab's
+live DOM (`citation_doi` first, then DC.Identifier, JSON-LD,
+og:url, canonical — same order as the page-metadata parser)
+via `chrome.scripting` + `activeTab`, and runs the normal
+Crossref lookup on it. The page is already loaded by you, so
+no fetch happens and no bot check can apply. It needs two
+extra permissions: `scripting` (inject the reader) and `tabs`
+(find the article tab when the lookup page itself is open as a
+full tab). If Chrome won't let the extension read the tab (e.g.
+you navigated after opening the panel and the activeTab grant
+lapsed), it says so plainly — click the extension icon while
+you're on the article tab and try again. The blocked-fetch
+message now also points at this button.
+
 ## Side panel (v3 — the popup no longer closes on outside clicks)
 
 A Chrome popup closes the moment you click anywhere else in the
@@ -100,15 +119,20 @@ v3 tightened the spacing, made the title the clear headline
 the remaining rows plain, added a visible loading state
 ("Looking up…" + disabled button while fetching), and a
 stronger input focus ring (teal border + soft teal glow).
-Same colours, same logo concept — polish only.
+Same colours, same logo concept — polish only. The layout is
+responsive: the side panel keeps its narrow single-column look,
+while the full tab (≥700px) centres the content in a ~920px
+container with the input and Lookup button side by side and the
+result rows in a wider label/value grid — no narrow left column
+with empty space on the right.
 
 ## Logo (v3, regenerated)
 
 `icons/icon128.png`, `icons/icon48.png`, `icons/icon16.png` —
-same concept (journal + ascending quartile bars, navy/teal),
-redrawn cleaner and sharper: a centred pale-teal document with
-four clean teal ascending bars on a deep navy rounded square,
-no text, higher contrast, crisper edges, less clutter at 16px.
+same concept (journal + ascending quartile bars, teal only),
+transparent background, no navy square, no border, no backdrop:
+just the teal journal document with four ascending teal bars,
+no text. All three are real PNGs with an alpha channel.
 Wired into `manifest.json` under `icons` and
 `action.default_icon`, and shown in the panel header (44px).
 
@@ -152,12 +176,25 @@ Wired into `manifest.json` under `icons` and
 7. Click outside the side panel in the browser — the panel must
    stay open with the last result still visible. Click "Open in
    a full tab" — the same lookup page opens in a tab.
+8. Blocked-publisher test: open
+   `https://www.sciencedirect.com/science/article/pii/S0944501317303993`
+   in a tab, click the extension icon, tap "Check this page".
+   It must read the DOI from the open page and show
+   `10.1016/j.micres.2017.08.011` ("Assessment of two carrier
+   materials for phosphate solubilizing biofertilizers…",
+   Microbiological Research, 2017, Source: Crossref) — the
+   background fetch of that link is blocked (HTTP 403), so this
+   only works via the open tab. Nothing about this DOI is
+   hard-coded; the DOM reader must find it on the page.
 
 ## Files
 
 - `manifest.json` — Manifest V3, version 0.2.0; permissions
-  `storage`, `activeTab`, `sidePanel`; `side_panel` default path
-  `sidepanel.html` (no `default_popup` any more); host
+  `storage`, `activeTab`, `sidePanel`, `scripting`, `tabs`
+  (`scripting` + `tabs` are for "Check this page": inject the
+  DOI reader into the open article tab and find that tab when
+  the lookup page is open as a full tab); `side_panel` default
+  path `sidepanel.html` (no `default_popup` any more); host
   permissions for `api.crossref.org`, `api.openalex.org`, plus
   a curated publisher list (nature, sciencedirect, elsevier,
   springer, wiley, tandfonline, mdpi, frontiers, nih.gov,
@@ -174,8 +211,10 @@ Wired into `manifest.json` under `icons` and
   fallback; last result persisted in `chrome.storage.local`.
 - `background.js` — service worker: fetches an article page
   and returns the DOI parsed from its metadata (blocked pages
-  reported as blocked, not as "no DOI"), and opens the side
-  panel on icon click. No storage, page HTML is discarded
-  after parsing.
+  reported as blocked, not as "no DOI"), reads the DOI from the
+  open article tab's DOM for "Check this page" (injects
+  shared.js, runs the DOM extractor — no fetch, no storage),
+  and opens the side panel on icon click. No storage, page HTML
+  is discarded after parsing.
 - `icons/icon16.png`, `icons/icon48.png`, `icons/icon128.png` —
   the extension logo in three sizes (v3 redraw).

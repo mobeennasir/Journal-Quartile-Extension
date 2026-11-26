@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Journal Quartile Extension — Phase 1 Spike</title>
   <link rel="stylesheet" href="popup.css">
 </head>
@@ -16,9 +17,13 @@
     </header>
 
     <label for="input">DOI or article link</label>
-    <input id="input" type="text" placeholder="10.1038/nature14539 or https://doi.org/10.1038/nature14539" autocomplete="off" spellcheck="false">
-    <button id="lookup" type="button">Lookup</button>
+    <div class="form-row">
+      <input id="input" type="text" placeholder="10.1038/nature14539 or https://doi.org/10.1038/nature14539" autocomplete="off" spellcheck="false">
+      <button id="lookup" type="button">Lookup</button>
+    </div>
     <p class="hint">Paste a bare DOI, a doi.org link, or any publisher article URL — including nature.com and ScienceDirect links, whose DOI is read from the article page.</p>
+    <button id="check-page" type="button" class="ghost">Check this page</button>
+    <p class="hint">Already on the article page? “Check this page” reads the DOI from the open tab — no page fetch, so a publisher bot check can't block it.</p>
 
     <section id="status" class="status" aria-live="polite"></section>
     <section id="result" class="result" hidden></section>
