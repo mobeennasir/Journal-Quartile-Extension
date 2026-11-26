@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Journal Quartile Extension — Phase 1 Spike</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header class="brand">
+      <img class="logo" src="icons/icon48.png" alt="" width="48" height="48">
+      <div>
+        <h1>Journal Quartile</h1>
+        <p class="tag">Phase 1 spike — DOI lookup only. No quartile / IF / category yet.</p>
+      </div>
+    </header>
+
+    <label for="input">DOI or article link</label>
+    <input id="input" type="text" placeholder="10.1038/nature14539 or https://doi.org/10.1038/nature14539" autocomplete="off" spellcheck="false">
+    <button id="lookup" type="button">Lookup</button>
+    <p class="hint">Paste a bare DOI, a doi.org link, or any publisher article URL — including nature.com and ScienceDirect links, whose DOI is read from the article page.</p>
+
+    <section id="status" class="status" aria-live="polite"></section>
+    <section id="result" class="result" hidden></section>
+
+    <footer class="foot">Sources: Crossref first, OpenAlex fallback. Only data returned by the API is shown.</footer>
+    <button id="open-tab" type="button" class="ghost">Open in a full tab</button>
+  </main>
+  <script src="shared.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
