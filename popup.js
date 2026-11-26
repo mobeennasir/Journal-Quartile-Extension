@@ -296,10 +296,17 @@ async function onCheckPageClick() {
     }
     if (response.error === "no-article-tab") {
       showError("No article tab found. Open the article in a Chrome tab first, then tap “Check this page”.");
-    } else if (response.error === "no-permission") {
-      showError("Chrome wouldn't let the extension read that tab. Click the extension icon while you're on the article tab, then tap “Check this page” again.");
+    } else if (response.error === "no-scripting") {
+      showError("This browser doesn't support the script injection “Check this page” needs. Copy the DOI from the article page and paste it above.");
+    } else if (response.error === "inject-shared-failed" || response.error === "inject-extract-failed" || response.error === "no-permission") {
+      // Surface the real Chrome error (e.g. "Cannot access contents
+      // of url …" / "No tab with id …") instead of a generic message,
+      // so a failure can actually be diagnosed.
+      const detail = response.detail ? ` Chrome said: ${response.detail}` : "";
+      showError(`Chrome couldn't read that tab${response.host ? ` (${response.host})` : ""}.${detail} Try reloading the article tab, then click the extension icon while you're on that tab and tap “Check this page” again. If it still fails, copy the DOI from the page and paste it above.`);
     } else if (response.error) {
-      showError("Couldn't read this page. Copy the DOI from the article page and paste it above.");
+      const detail = response.detail ? ` Chrome said: ${response.detail}` : "";
+      showError(`Couldn't read this page.${detail} Copy the DOI from the article page and paste it above.`);
     } else {
       showError(`No DOI found on this page${response.host ? ` (${response.host})` : ""}. It may not be an article page, or it may not carry a DOI tag. Copy the DOI from the page and paste it above.`);
     }

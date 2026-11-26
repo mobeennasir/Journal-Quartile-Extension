@@ -87,16 +87,32 @@ article in a Chrome tab, click the extension icon, tap the
 button. The background worker reads the DOI from that tab's
 live DOM (`citation_doi` first, then DC.Identifier, JSON-LD,
 og:url, canonical — same order as the page-metadata parser)
-via `chrome.scripting` + `activeTab`, and runs the normal
-Crossref lookup on it. The page is already loaded by you, so
-no fetch happens and no bot check can apply. It needs two
-extra permissions: `scripting` (inject the reader) and `tabs`
-(find the article tab when the lookup page itself is open as a
-full tab). If Chrome won't let the extension read the tab (e.g.
-you navigated after opening the panel and the activeTab grant
-lapsed), it says so plainly — click the extension icon while
-you're on the article tab and try again. The blocked-fetch
-message now also points at this button.
+via `chrome.scripting`, and runs the normal Crossref lookup on
+it. The page is already loaded by you, so no fetch happens and
+no bot check can apply. It needs two extra permissions:
+`scripting` (inject the reader) and `tabs` (find the article
+tab when the lookup page itself is open as a full tab).
+
+**Fixed 26 Nov 2026 — why it failed on ScienceDirect the first
+time.** The v4 build made ONE `chrome.scripting.executeScript`
+call with BOTH `files: ["shared.js"]` AND a `func`. Per the
+scripting API spec exactly one of `files` and `func` may be
+specified, so that call was invalid and the extractor never
+ran — which is why it reported "Chrome wouldn't let the
+extension read that tab" even though the user WAS on the
+article tab with the panel open. The fix is two separate
+calls: (1) inject `shared.js` alone, await it, (2) then run
+the extractor in its own call (the func is self-contained and
+only calls the global step 1 defined). Injection now works
+via the manifest's host permissions for the publisher
+origins (e.g. `*.sciencedirect.com`) — it does NOT rely on
+an `activeTab` grant alone. Tab picking is also explicit:
+when the side panel is open the active tab is the article
+tab behind it; when the lookup page is open as a full tab,
+the worker falls back to the most recently used http(s) tab.
+If injection still fails, the UI now shows Chrome's real
+error message instead of a generic one. The blocked-fetch
+message also points at this button.
 
 ## Side panel (v3 — the popup no longer closes on outside clicks)
 
@@ -178,16 +194,21 @@ Wired into `manifest.json` under `icons` and
 7. Click outside the side panel in the browser — the panel must
    stay open with the last result still visible. Click "Open in
    a full tab" — the same lookup page opens in a tab.
-8. Blocked-publisher test: open
+8. Blocked-publisher test (retest after the 26 Nov 2026 fix —
+   v4 failed this step with "Chrome wouldn't let the extension
+   read that tab" because of the invalid files+func call, see
+   above): open
    `https://www.sciencedirect.com/science/article/pii/S0944501317303993`
-   in a tab, click the extension icon, tap "Check this page".
-   It must read the DOI from the open page and show
+   in a tab, click the extension icon so the side panel opens
+   on the right, tap "Check this page". It must read the DOI
+   from the open page and show
    `10.1016/j.micres.2017.08.011` ("Assessment of two carrier
    materials for phosphate solubilizing biofertilizers…",
    Microbiological Research, 2017, Source: Crossref) — the
    background fetch of that link is blocked (HTTP 403), so this
    only works via the open tab. Nothing about this DOI is
-   hard-coded; the DOM reader must find it on the page.
+   hard-coded; the DOM reader must find it on the page. If it
+   fails, the error now shows Chrome's real reason.
 
 ## Files
 
@@ -215,8 +236,10 @@ Wired into `manifest.json` under `icons` and
   and returns the DOI parsed from its metadata (blocked pages
   reported as blocked, not as "no DOI"), reads the DOI from the
   open article tab's DOM for "Check this page" (injects
-  shared.js, runs the DOM extractor — no fetch, no storage),
-  and opens the side panel on icon click. No storage, page HTML
-  is discarded after parsing.
+  shared.js in one call, then runs the DOM extractor in a
+  second call — exactly one of files/func per call, host
+  permission, no fetch, no storage; real injection errors are
+  surfaced with Chrome's message), and opens the side panel on
+  icon click. No storage, page HTML is discarded after parsing.
 - `icons/icon16.png`, `icons/icon48.png`, `icons/icon128.png` —
   the extension logo in three sizes (v3 redraw).
