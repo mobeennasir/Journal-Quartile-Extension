@@ -126,15 +126,17 @@ container with the input and Lookup button side by side and the
 result rows in a wider label/value grid — no narrow left column
 with empty space on the right.
 
-## Logo (v3, regenerated)
+## Logo (solid background, toolbar-visible)
 
 `icons/icon128.png`, `icons/icon48.png`, `icons/icon16.png` —
-same concept (journal + ascending quartile bars, teal only),
-transparent background, no navy square, no border, no backdrop:
-just the teal journal document with four ascending teal bars,
-no text. All three are real PNGs with an alpha channel.
+same concept (journal + ascending quartile bars), now on a solid
+deep navy (`#12324f`) rounded square so it pops on a light
+toolbar like other extension icons: pale teal journal document
+with bold deep-teal ascending bars (four bars at 128/48px,
+three thicker bars at 16px so they stay legible), no text.
 Wired into `manifest.json` under `icons` and
-`action.default_icon`, and shown in the panel header (44px).
+`action.default_icon`, and shown in the panel header (64px,
+72px in the wide full-tab view).
 
 ## Load unpacked in Chrome
 

@@ -14,8 +14,8 @@ body {
 main { max-width: 452px; margin: 0 auto; padding: 14px 16px 12px; }
 
 /* Header */
-.brand { display: flex; gap: 10px; align-items: center; margin-bottom: 13px; }
-.logo { width: 44px; height: 44px; border-radius: 10px; flex-shrink: 0; }
+.brand { display: flex; gap: 12px; align-items: center; margin-bottom: 13px; }
+.logo { width: 64px; height: 64px; border-radius: 10px; flex-shrink: 0; }
 h1 { font-size: 17px; line-height: 1.2; margin: 0; color: #12324f; letter-spacing: -0.01em; }
 .tag { margin: 2px 0 0; color: #5b6b7a; font-size: 12px; line-height: 1.4; }
 
@@ -114,9 +114,9 @@ input::placeholder { color: #8a97a5; }
   body { font-size: 15px; }
   main { max-width: 920px; padding: 28px 32px 24px; }
 
-  /* Header: slightly larger logo and title. */
-  .brand { gap: 14px; margin-bottom: 20px; }
-  .logo { width: 52px; height: 52px; }
+  /* Header: larger logo and title. */
+  .brand { gap: 16px; margin-bottom: 20px; }
+  .logo { width: 72px; height: 72px; }
   h1 { font-size: 22px; }
   .tag { font-size: 13px; }
 
