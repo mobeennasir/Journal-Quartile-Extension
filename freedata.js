@@ -321,10 +321,28 @@
     return d.getMonth() >= 5 ? d.getFullYear() - 1 : d.getFullYear() - 2;
   }
 
+  // ---------- SJR Cloudflare clearance ----------
+  // A Cloudflare clearance earned by a real tab is remembered
+  // with a timestamp (27 Nov 2026, tab policy: visible tabs
+  // open only when a background tab actually hits a check).
+  // Clearance cookies live hours, not days — 12h is the window
+  // inside which the next years go background-first with a
+  // short poll; older than that, the background poll is given
+  // longer before a visible tab is forced.
+  var SJR_CLEARANCE_TTL_MS = 12 * 60 * 60 * 1000;
+  function sjrClearanceIsFresh(clearedAt, nowMs) {
+    if (!clearedAt) return false;
+    const t = Date.parse(clearedAt);
+    if (isNaN(t)) return false;
+    const now = typeof nowMs === "number" ? nowMs : Date.now();
+    return now - t >= 0 && now - t < SJR_CLEARANCE_TTL_MS;
+  }
+
   const api = {
     mjlSearchUrl: mjlSearchUrl,
     sjrRankPageUrl: sjrRankPageUrl,
     isChallengeText: isChallengeText,
+    sjrClearanceIsFresh: sjrClearanceIsFresh,
     parseMjlSearchHtml: parseMjlSearchHtml,
     indexNameToCategory: indexNameToCategory,
     mjlDownloadsPage: MJL_DOWNLOADS_PAGE,

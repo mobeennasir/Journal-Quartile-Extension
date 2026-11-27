@@ -140,11 +140,13 @@ async function ensureSjrYear(year) {
       return { state: "fetched", year: y, rows: res.rows };
     }
     if (res && (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
-      // Tab budget 180s: tab load <= 20s + challenge poll <= 30s
-      // + in-tab fetch <= 90s = 140s worst case (see
-      // fetchSjrViaTab). The old 120s budget was shorter than
-      // the worst-case flow, so the popup gave up and recorded
-      // "blocked" while the worker was still fetching.
+      // Tab budget 180s: background tab (load <= 20s + poll
+      // <= 10s with clearance on record, 30s without) and, only
+      // if the background hit a challenge, a visible tab (load
+      // <= 20s + poll <= 60s) + in-tab fetch <= 90s. The worst
+      // case can pass 180s, but only when a human check is
+      // involved — the worker keeps going and stores the file,
+      // and the re-check below recovers it.
       res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 180000);
       if (res && res.rows) {
         refreshImportStatus();
@@ -1416,14 +1418,13 @@ function batchRowToResult(row, found, rank, note, sjrState) {
 // table just makes scrolling too much). Batch results live only
 // in the downloaded CSV — see DATA.resultsToCsv.
 
-// Live SJR status line under the batch status: one short outcome
-// per distinct year, so the user can see the auto-fetch working
-// (or blocked) instead of watching SJR tabs open and close.
+// Single SJR tag under the batch status: ONE label that is
+// replaced each time a year's data resolves — never a paragraph
+// listing every saved year (user, 27 Nov 2026). The tag lives
+// in the status area only, never in the article results.
 function updateBatchSjrStatus(outcomes) {
   if (!batchSjrStatusEl) return;
-  const lines = [...outcomes.entries()].sort((a, b) => a[0] - b[0])
-    .map(([year, o]) => DATA.sjrOutcomeText(o.state, year, o.rows, o.detail)).filter(Boolean);
-  batchSjrStatusEl.textContent = lines.length ? "SJR: " + lines.join("; ") + "." : "";
+  batchSjrStatusEl.textContent = DATA.sjrLatestOutcomeText(outcomes);
 }
 
 async function runBatch(rows, opts) {
@@ -1458,7 +1459,6 @@ async function runBatch(rows, opts) {
     const k = (r.doi || "").toLowerCase();
     if (k && !seenDois.has(k)) seenDois.set(k, idx + 1);
   });
-  const sjrYearsFetched = new Set(); // publication years whose SJR data was fetched during this run
   const sjrYearOutcomes = new Map(); // year -> ensureSjrYear outcome (one attempt per distinct year)
   let finished = false;
   let stopped = false;
@@ -1528,7 +1528,6 @@ async function runBatch(rows, opts) {
           }
           sjrState = ensured.state;
           if (ensured.state === "fetched") {
-            sjrYearsFetched.add(year);
             rank = await safeGetRank(issns, year);
           }
         }
@@ -1579,15 +1578,20 @@ async function runBatch(rows, opts) {
   }
   if (stopped) {
     // Stopped by the user: partial results are real results, so
-    // the download is shown, and the saved state offers resume
-    // from the next row. The state stays saved until the batch
-    // finishes or a new file replaces it.
+    // the WoS pass runs over them too (27 Nov 2026: the
+    // download is shown only once WoS categories are fetched),
+    // then the download is shown and the saved state offers
+    // resume from the next row. The state stays saved until the
+    // batch finishes or a new file replaces it.
     if (batchStopBtn) batchStopBtn.hidden = true;
     batchResultsEl.hidden = false;
-    batchDownloadBtn.hidden = false;
-    if (batchMjlBtn) batchMjlBtn.hidden = false;
+    if (batchMjlBtn) { batchMjlBtn.hidden = false; batchMjlBtn.disabled = true; }
     batchProgressBarEl.style.width = Math.round((batchResults.length / rows.length) * 100) + "%";
-    batchStatusEl.textContent = `Batch stopped at ${batchResults.length} of ${rows.length} articles — results are partial. Resume to continue from where it stopped.`;
+    batchStatusEl.textContent = `Batch stopped at ${batchResults.length} of ${rows.length} articles — results are partial. Fetching WoS categories…`;
+    const wosStopped = await fetchBatchWoSCategories();
+    batchDownloadBtn.hidden = false;
+    if (batchMjlBtn) batchMjlBtn.disabled = false;
+    batchStatusEl.textContent = `Batch stopped at ${batchResults.length} of ${rows.length} articles — results are partial. ${wosPassText(wosStopped)} Resume to continue from where it stopped.`;
     pendingBatchState = { rows: rows, results: batchResults.slice(), nextIndex: batchResults.length, savedAt: new Date().toISOString() };
     if (batchResumeBtn) batchResumeBtn.hidden = false;
     return;
@@ -1595,10 +1599,8 @@ async function runBatch(rows, opts) {
   // Finished: no resume state to keep.
   clearBatchState();
   if (batchStopBtn) batchStopBtn.hidden = true;
-  // Only now, with every row done, is the download shown.
   batchResultsEl.hidden = false;
-  batchDownloadBtn.hidden = false;
-  if (batchMjlBtn) batchMjlBtn.hidden = false;
+  if (batchMjlBtn) { batchMjlBtn.hidden = false; batchMjlBtn.disabled = true; }
   batchProgressBarEl.style.width = "100%";
   updateBatchSjrStatus(sjrYearOutcomes);
   // The summary adds up: found rows split into JCR / SJR /
@@ -1610,7 +1612,16 @@ async function runBatch(rows, opts) {
   const noRankCount = foundRows.length - jcrCount - sjrCount;
   const notFoundText = DATA.notFoundBreakdown(batchResults);
   const dupCount = batchResults.filter((r) => r.status === "duplicate").length;
-  batchStatusEl.textContent = `Done: ${rows.length} articles. ${foundRows.length} found (${jcrCount} JCR, ${sjrCount} SJR fallback, ${noRankCount} found but no ranking data)${notFoundText ? ", " + notFoundText : ""}.${dupCount ? ` ${dupCount} duplicate row${dupCount === 1 ? "" : "s"} of earlier rows.` : ""}${sjrYearsFetched.size ? ` SJR data fetched for ${[...sjrYearsFetched].sort().join(", ")}.` : ""}`;
+  const batchSummary = `Done: ${rows.length} articles. ${foundRows.length} found (${jcrCount} JCR, ${sjrCount} SJR fallback, ${noRankCount} found but no ranking data)${notFoundText ? ", " + notFoundText : ""}.${dupCount ? ` ${dupCount} duplicate row${dupCount === 1 ? "" : "s"} of earlier rows.` : ""}`;
+  // WoS categories fetch AUTOMATICALLY once the SJR phase
+  // finishes — no click needed (27 Nov 2026). The download
+  // stays hidden until this pass finishes, so the CSV never
+  // has blank WoS columns because the fetch had not run.
+  batchStatusEl.textContent = batchSummary + " Fetching WoS categories…";
+  const wos = await fetchBatchWoSCategories();
+  batchDownloadBtn.hidden = false;
+  if (batchMjlBtn) batchMjlBtn.disabled = false;
+  batchStatusEl.textContent = batchSummary + " " + wosPassText(wos);
   if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
     chrome.storage.local.set({ lastBatch: batchResults });
   }
@@ -1663,34 +1674,49 @@ batchDownloadBtn.addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
-// "Get WoS categories (free)": check the category for every
-// batch row that has an ISSN and no category yet, from the free
-// public MJL search. Answers are stored until expiry, so the
-// next batch for the same journals is instant.
+// WoS pass over the batch rows (shared by the automatic run
+// at the end of a batch and the manual button): check the
+// category for every row that has an ISSN and no category yet,
+// from the free public MJL search. Answers are stored until
+// expiry, so the next batch for the same journals is instant.
+// Returns { checked, found, saved }.
+async function fetchBatchWoSCategories() {
+  let checked = 0, found = 0, saved = 0;
+  for (let i = 0; i < batchResults.length; i++) {
+    const r = batchResults[i];
+    if (!r.issns || !r.issns.length || (r.rank && r.rank.wosCategory)) continue;
+    const res = await fetchMjlCategory(r.issns, r.journal);
+    checked++;
+    if (res && res.category) {
+      found++;
+      if (res.stored) saved++;
+      r.rank = r.rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
+      r.rank.wosCategory = res.category;
+      // Saved by the worker as it fetched (the single save
+      // point) — no panel-side save here any more.
+      // No panel table any more: the enriched category lives
+      // in the downloaded CSV, not in a row on screen.
+    }
+    await sleep(300); // polite pacing for the MJL search
+  }
+  return { checked, found, saved };
+}
+
+function wosPassText(wos) {
+  return `WoS categories: ${wos.found} found of ${wos.checked} checked${wos.found ? `, ${wos.saved} saved.` : "."}`;
+}
+
+// "Get WoS categories (free)": manual re-check for rows still
+// missing a category. The automatic pass at the end of every
+// batch (see runBatch) already fetches them — this button is
+// only needed when some rows are still blank afterwards.
 if (batchMjlBtn) {
   batchMjlBtn.addEventListener("click", async () => {
     if (!batchResults.length) return;
     batchMjlBtn.disabled = true;
-    let checked = 0, found = 0, saved = 0;
     try {
-      for (let i = 0; i < batchResults.length; i++) {
-        const r = batchResults[i];
-        if (!r.issns || !r.issns.length || (r.rank && r.rank.wosCategory)) continue;
-        const res = await fetchMjlCategory(r.issns, r.journal);
-        checked++;
-        if (res && res.category) {
-          found++;
-          if (res.stored) saved++;
-          r.rank = r.rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
-          r.rank.wosCategory = res.category;
-          // Saved by the worker as it fetched (the single save
-          // point) — no panel-side save here any more.
-          // No panel table any more: the enriched category lives
-          // in the downloaded CSV, not in a row on screen.
-        }
-        await sleep(300); // polite pacing for the MJL search
-      }
-      batchStatusEl.textContent = `WoS categories: ${found} found of ${checked} checked${found ? `, ${saved} saved.` : "."}`;
+      const wos = await fetchBatchWoSCategories();
+      batchStatusEl.textContent = wosPassText(wos);
     } finally {
       batchMjlBtn.disabled = false;
       refreshImportStatus();

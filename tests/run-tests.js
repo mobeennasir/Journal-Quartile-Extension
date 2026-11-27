@@ -754,10 +754,12 @@ async function main() {
     popupJs.indexOf('"SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page"') !== -1);
   check("popup batch fetches each row's publication year when its rank is missing",
     popupJs.indexOf('if (rank && rank.source === "none" && year)') !== -1
-    && popupJs.indexOf("await ensureSjrYear(year)") !== -1
-    && popupJs.indexOf("sjrYearsFetched.add(year)") !== -1);
-  check("popup batch final status lists the SJR years fetched",
-    popupJs.indexOf("SJR data fetched for ${[...sjrYearsFetched].sort().join(") !== -1);
+    && popupJs.indexOf("await ensureSjrYear(year)") !== -1);
+  // SUPERSEDED 27 Nov 2026 (user order): the finished summary no
+  // longer lists the fetched SJR years — the single tag in the
+  // status area shows only the latest year (see section 35).
+  check("popup batch final status does NOT list the SJR years fetched any more",
+    popupJs.indexOf("SJR data fetched for ${[...sjrYearsFetched].sort().join(") === -1);
   check("panel loads freedata.js so the panel can use sjrLatestYear",
     panelHtml.indexOf('<script src="freedata.js"></script>') !== -1);
   check("popup SJR button pre-check uses stored-year coverage, not just the latest file",
@@ -1039,9 +1041,15 @@ async function main() {
   // (d) The worker's direct fetch could eat the whole 90s budget
   // (60s x 3 URLs) before the tab path was ever tried.
   const bgJs31 = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
-  check("fetchSjrViaTab opens a VISIBLE tab so the challenge can clear (active: true)",
-    bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })') !== -1
-    && bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })') === -1);
+  // SUPERSEDED 27 Nov 2026 (user order, tab policy): the SJR tab
+  // opens in the BACKGROUND first; a visible tab is forced only
+  // when the background tab actually hits a Cloudflare check
+  // (see section 35). Both creates exist, background first.
+  check("fetchSjrViaTab opens the tab in the background first, visible only on a challenge",
+    bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })') !== -1
+    && bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })') !== -1
+    && bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })')
+      < bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })'));
   check("challenge poll is capped at 30s (15 x 2s), not 40s",
     bgJs31.indexOf("for (let i = 0; i < 15; i++)") !== -1);
   check("in-tab CSV fetch has a total ~90s deadline (first candidate up to 60s, rest share the remainder)",
@@ -1116,7 +1124,7 @@ async function main() {
     || (popupJs.match(/putMjl\(/g) || []).length === 1);
   check("batch WoS summary counts how many were saved, not just found",
     popupJs.indexOf("let checked = 0, found = 0, saved = 0;") !== -1
-    && popupJs.indexOf("WoS categories: ${found} found of ${checked} checked${found ? `, ${saved} saved.` : \".\"}`") !== -1);
+    && popupJs.indexOf("WoS categories: ${wos.found} found of ${wos.checked} checked${wos.found ? `, ${wos.saved} saved.` : \".\"}`") !== -1);
   // Store behaviour (MemoryStore shares the IdbStore keying).
   const wosStore = new DATA.MemoryStore();
   const wosAt = new Date().toISOString();
@@ -1278,8 +1286,11 @@ async function main() {
   check("single lookup shows the short failure reason in the SJR row",
     popupJs33.indexOf("rankingRows(data, rank, sjrNote, sjrDetail)") !== -1
     && popupJs33.indexOf("DATA.sjrBlockReason(sjrDetail)") !== -1);
-  check("batch SJR status line carries the failure detail per year",
-    popupJs33.indexOf("DATA.sjrOutcomeText(o.state, year, o.rows, o.detail)") !== -1);
+  // SUPERSEDED in form 27 Nov 2026 (user order): the batch SJR
+  // status is ONE tag showing only the latest year — the failure
+  // detail still rides on that tag via sjrLatestOutcomeText.
+  check("batch SJR tag carries the failure detail for the latest year",
+    popupJs33.indexOf("DATA.sjrLatestOutcomeText(outcomes)") !== -1);
   check("Get free SJR data names the real failure reason instead of always saying bot check",
     popupJs33.indexOf("DATA.sjrBlockReason(res.detail)") !== -1
     && popupJs33.indexOf("SJR blocked the download (bot check)") !== -1);
@@ -1361,6 +1372,117 @@ async function main() {
   check("data only goes to the public metadata APIs and the SJR/MJL sites",
     popupJs34.indexOf("api.crossref.org") !== -1 && popupJs34.indexOf("api.openalex.org") !== -1
     && allJs34.indexOf("jcr.clarivate.com") === -1 && allJs34.indexOf("clarivate.com/api") === -1);
+
+  console.log("== 35. Single SJR tag, background-first tabs, auto WoS, download gating (27 Nov 2026) ==");
+  // User order 27 Nov 2026 18:23 PKT, after the batch finished:
+  // (1) no paragraph listing every saved SJR year — ONE tag
+  // that is replaced when the next year saves; (2) SJR
+  // auto-fetch fast and robust; (3) visible tabs only when a
+  // background tab actually hits a Cloudflare check; (4) WoS
+  // categories fetch automatically once SJR finishes, no click;
+  // (5) the download button appears only once WoS is fetched.
+  const FREE35 = require("../freedata.js");
+  // (1) Single tag: the latest outcome only, never all years.
+  const outcomes35 = new Map([
+    [2015, { state: "fetched", year: 2015, rows: 41125 }],
+    [2021, { state: "fetched", year: 2021, rows: 45380 }],
+    [2022, { state: "fetched", year: 2022, rows: 46790 }],
+  ]);
+  check("single SJR tag shows only the latest year, with its row count",
+    DATA.sjrLatestOutcomeText(outcomes35) === "SJR 2022 saved, 46,790 rows",
+    DATA.sjrLatestOutcomeText(outcomes35));
+  check("single SJR tag never lists more than one year",
+    DATA.sjrLatestOutcomeText(outcomes35).indexOf("2021") === -1
+    && DATA.sjrLatestOutcomeText(outcomes35).indexOf("2015") === -1);
+  check("single SJR tag says already-saved for a stored year",
+    DATA.sjrLatestOutcomeText(new Map([[2023, { state: "ready", year: 2023 }]])) === "SJR 2023 already saved");
+  check("single SJR tag says no data yet for an unreleased year",
+    DATA.sjrLatestOutcomeText(new Map([[2026, { state: "not-released", year: 2026 }]])) === "No SJR data for 2026 yet");
+  check("single SJR tag is empty with no outcomes",
+    DATA.sjrLatestOutcomeText(new Map()) === "" && DATA.sjrLatestOutcomeText(null) === "");
+  const popupJs35 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  check("batch SJR status uses the single tag, no joined paragraph",
+    popupJs35.indexOf("batchSjrStatusEl.textContent = DATA.sjrLatestOutcomeText(outcomes);") !== -1
+    && popupJs35.indexOf('lines.join("; ")') === -1);
+  check("finished batch summary no longer lists the fetched SJR years",
+    popupJs35.indexOf("SJR data fetched for") === -1);
+  // (3) Clearance freshness: 12h window.
+  const now35 = Date.now();
+  check("clearance is fresh just after a human verification",
+    FREE35.sjrClearanceIsFresh(new Date(now35 - 1000).toISOString(), now35) === true);
+  check("clearance is stale after 13 hours",
+    FREE35.sjrClearanceIsFresh(new Date(now35 - 13 * 60 * 60 * 1000).toISOString(), now35) === false);
+  check("clearance is fresh at 11 hours, stale with no timestamp",
+    FREE35.sjrClearanceIsFresh(new Date(now35 - 11 * 60 * 60 * 1000).toISOString(), now35) === true
+    && FREE35.sjrClearanceIsFresh(null, now35) === false
+    && FREE35.sjrClearanceIsFresh("not-a-date", now35) === false);
+  // (3) Tab policy in background.js: background first, visible
+  // only on a real challenge; clearance recorded on every clear.
+  const bgJs35 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
+  check("SJR tab opens in the background first, never visible by default",
+    bgJs35.indexOf("chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })") !== -1);
+  check("a visible SJR tab is created only in the escalation branch",
+    (bgJs35.match(/chrome\.tabs\.create\(\{ url: FREE\.sjrRankPageUrl\(year\), active: true \}\)/g) || []).length === 1
+    && bgJs35.indexOf("active: true })") > bgJs35.indexOf("active: false })"));
+  check("clearance is recorded in chrome.storage.local when a tab clears",
+    bgJs35.indexOf('chrome.storage.local.set({ sjrClearance: { clearedAt:') !== -1
+    && bgJs35.indexOf("await setSjrClearance();") !== -1);
+  check("challenge poll uses 1s steps, not a blind 30s wait",
+    bgJs35.indexOf("async function pollSjrTabForClearance(tabId, budgetMs)") !== -1
+    && bgJs35.indexOf("await sleepMs(1000);") !== -1);
+  // Extract pollSjrTabForClearance and run it with mocks.
+  function extractFn(src, marker) {
+    const start = src.indexOf(marker);
+    if (start === -1) return null;
+    let i = src.indexOf("{", start);
+    let depth = 0;
+    for (let j = i; j < src.length; j++) {
+      if (src[j] === "{") depth++;
+      else if (src[j] === "}") { depth--; if (depth === 0) return src.slice(start, j + 1); }
+    }
+    return null;
+  }
+  const pollSrc = extractFn(bgJs35, "async function pollSjrTabForClearance(tabId, budgetMs) {");
+  check("pollSjrTabForClearance is extractable from background.js", pollSrc !== null);
+  if (pollSrc) {
+    global.FREE = FREE35;
+    global.sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+    const cleanPage = "SJR ranking page " + "x".repeat(600);
+    const poll = eval("(" + pollSrc + ")");
+    global.readTabText = async () => cleanPage;
+    check("poll sees a clean page at once (clearance present: ~1s, no blind wait)",
+      (await poll(1, 10000)) === "cleared");
+    global.readTabText = async () => "Just a moment... checking your browser";
+    check("poll reports challenge when the page shows the check",
+      (await poll(1, 10000)) === "challenge");
+    global.readTabText = async () => "";
+    check("poll does not mistake an empty, still-loading page for a challenge",
+      (await poll(1, 1500)) === "timeout");
+    global.readTabText = async () => "short page, no challenge words";
+    check("poll times out on a page that never resolves",
+      (await poll(1, 1500)) === "timeout");
+  }
+  // (4)+(5) Auto WoS + download gating in popup.js.
+  check("WoS pass is a shared function used by the batch and the button",
+    popupJs35.indexOf("async function fetchBatchWoSCategories()") !== -1
+    && popupJs35.indexOf("const wos = await fetchBatchWoSCategories();") !== -1
+    && popupJs35.indexOf("const wosStopped = await fetchBatchWoSCategories();") !== -1);
+  const finishSeg = popupJs35.slice(popupJs35.indexOf("// Finished: no resume state to keep."));
+  check("finished batch runs the WoS pass BEFORE the download is shown",
+    finishSeg.indexOf("await fetchBatchWoSCategories();") !== -1
+    && finishSeg.indexOf("await fetchBatchWoSCategories();") < finishSeg.indexOf("batchDownloadBtn.hidden = false;"));
+  check("finished batch says what is still running while WoS fetches",
+    popupJs35.indexOf('batchSummary + " Fetching WoS categories…";') !== -1);
+  const stopSeg = popupJs35.slice(popupJs35.indexOf("if (stopped) {"), popupJs35.indexOf("// Finished: no resume state to keep."));
+  check("stopped batch also runs the WoS pass before showing the download",
+    stopSeg.indexOf("await fetchBatchWoSCategories();") !== -1
+    && stopSeg.indexOf("await fetchBatchWoSCategories();") < stopSeg.indexOf("batchDownloadBtn.hidden = false;"));
+  check("manual WoS button stays as a re-check, not a requirement",
+    popupJs35.indexOf("manual re-check") !== -1
+    && popupJs35.indexOf('id="batch-mjl"') === -1); // button lives in sidepanel.html, not popup.js
+  const panel35 = fs.readFileSync(path.join(DIR, "..", "sidepanel.html"), "utf8");
+  check("panel still has the WoS button for a manual re-check",
+    panel35.indexOf('id="batch-mjl"') !== -1 && panel35.indexOf("Get WoS categories (free)") !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));

@@ -919,6 +919,22 @@
     }
   }
 
+  // ---------- Single SJR tag (pure, unit-tested) ----------
+  // ONE tag, updated — never a paragraph listing every saved
+  // year (user, 27 Nov 2026). outcomes is the Map year ->
+  // outcome, in the order years resolved; the tag shows only
+  // the latest one and is replaced when the next year saves
+  // ("SJR 2022 saved, 46,790 rows").
+  function sjrLatestOutcomeText(outcomes) {
+    if (!outcomes) return "";
+    const entries = outcomes instanceof Map
+      ? [...outcomes.entries()]
+      : (Array.isArray(outcomes) ? outcomes : []);
+    if (!entries.length) return "";
+    const last = entries[entries.length - 1];
+    return sjrOutcomeText(last[1].state, last[0], last[1].rows, last[1].detail) || "";
+  }
+
   // ---------- Batch resume point (pure, unit-tested) ----------
   // A batch runs in the side-panel page: if the panel closes or
   // the browser reloads mid-batch, the in-page loop dies, but
@@ -1078,7 +1094,7 @@
     MemoryStore: MemoryStore, IdbStore: IdbStore,
     lookupRankSync: lookupRankSync,
     RESULTS_HEADER: RESULTS_HEADER, resultsToCsv: resultsToCsv,
-    sjrOutcomeText: sjrOutcomeText, sjrBlockReason: sjrBlockReason, notFoundBreakdown: notFoundBreakdown,
+    sjrOutcomeText: sjrOutcomeText, sjrLatestOutcomeText: sjrLatestOutcomeText, sjrBlockReason: sjrBlockReason, notFoundBreakdown: notFoundBreakdown,
     batchResumePoint: batchResumePoint,
     nextJcrExpiry: nextJcrExpiry,
     sjrExpiresAt: sjrExpiresAt, mjlExpiresAt: mjlExpiresAt,

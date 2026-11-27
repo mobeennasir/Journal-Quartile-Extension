@@ -732,65 +732,128 @@ async function fetchSjrCsvInTabSingle(tabId, year) {
 
 // One-click download + import (fallback when the background
 // fetch is blocked): open the SJR journal ranking page itself
-// in a tab in the USER's browser — that is the page Cloudflare
-// actually challenges (the home page is not, so opening it
-// earned no clearance: the old bug) — poll until the managed
-// challenge clears, then fetch the CSV FROM THE TAB
-// (fetchSjrCsvInTab, same origin, cookies attached) and import
-// it. The tab is always closed afterwards, and no file is
-// downloaded into the user's Downloads folder. The imported
-// data is stored until expiry like every other import.
-// Returns { rows, year, via } or { error, year } where error
-// is "challenge" (the human check never cleared), "blocked"
-// (the in-tab CSV fetch still got no CSV), or "failed".
+// in a tab — that is the page Cloudflare actually challenges
+// (the home page is not, so opening it earned no clearance:
+// the old bug) — wait until the managed challenge clears, then
+// fetch the CSV FROM THE TAB (fetchSjrCsvInTab, same origin,
+// cookies attached) and import it. The tab is always closed
+// afterwards, and no file is downloaded into the user's
+// Downloads folder. The imported data is stored until expiry
+// like every other import path. Returns { rows, year, via } or
+// { error, year } where error is "challenge" (the human check
+// never cleared), "blocked" (the in-tab CSV fetch still got no
+// CSV), or "failed".
 //
-// The tab is opened ACTIVE (visible), not in the background:
-// that is the fix for the open-close-without-download the user
-// saw in every batch. The page loads fine in his visible
-// browser, but a hidden background tab is throttled and
-// Cloudflare's managed challenge does not reliably run/clear
-// there — the old version polled a background tab for up to
-// 40s, never saw the challenge clear, and closed with no data.
-// A visible tab flashes open once per distinct year (never per
-// article) and closes as soon as the CSV is fetched.
-//
-// Timing budget, so the popup's message timeout is never the
-// thing that kills a working fetch (the old bug #2): tab load
-// <= 20s + challenge poll <= 30s + in-tab fetch <= 90s = 140s
-// worst case, inside the popup's 180s budget for this call.
-// (Only the rare single-return fallback can add up to 60s more;
-// the popup then times out, but the worker keeps going, stores
-// the file, and the popup recovers it by re-checking the store.)
+// TAB POLICY (27 Nov 2026, user's order): a visible tab opens
+// ONLY when a background tab actually hits a Cloudflare check.
+// The tab opens in the BACKGROUND first, always. With clearance
+// already present the page reads clean on the first check, so
+// the background attempt finishes in ~1s instead of a blind
+// 30s poll. Only if the background tab shows challenge text
+// (or never resolves) is it closed and ONE visible tab forced
+// for that year, so the human can clear the check; once it
+// clears, the clearance is recorded and later years go
+// background again. So a batch that needs 6 years opens at
+// most 1 visible tab after the first human verification —
+// never one visible tab per year. Timing budget: background
+// poll <= 10s (30s when no clearance is on record yet) +
+// visible poll <= 60s + in-tab fetch <= 90s, inside the
+// popup's 180s budget for this call. (Only the rare
+// single-return fallback can add up to 60s more; the popup
+// then times out, but the worker keeps going, stores the file,
+// and the popup recovers it by re-checking the store.)
 // The outcome is also written to chrome.storage.local, so a
 // popup that timed out anyway can recover it by re-checking
 // the store (see ensureSjrYear in popup.js).
+
+// Cloudflare clearance earned by a real tab, remembered with a
+// timestamp. Best-effort storage: missing chrome or a storage
+// error just means "no clearance on record".
+function getSjrClearance() {
+  try {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get("sjrClearance", (v) => resolve((v && v.sjrClearance) || null));
+      } catch (err) { resolve(null); }
+    });
+  } catch (err) { return Promise.resolve(null); }
+}
+
+function setSjrClearance() {
+  try {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return Promise.resolve();
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.set({ sjrClearance: { clearedAt: new Date().toISOString() } }, () => resolve());
+      } catch (err) { resolve(); }
+    });
+  } catch (err) { return Promise.resolve(); }
+}
+
+// Poll a tab's rendered text until it reads clean ("cleared"),
+// shows the Cloudflare challenge ("challenge"), or the budget
+// runs out ("timeout"). 1s steps, so a cleared page is seen in
+// ~1s instead of after a blind 30s poll.
+async function pollSjrTabForClearance(tabId, budgetMs) {
+  const deadline = Date.now() + (budgetMs || 10000);
+  for (;;) {
+    let text = "";
+    try { text = await readTabText(tabId); } catch (err) { return "timeout"; }
+    if (text && text.length > 500 && !FREE.isChallengeText(text)) return "cleared";
+    if (text && FREE.isChallengeText(text)) return "challenge";
+    if (Date.now() >= deadline) return "timeout";
+    await sleepMs(1000);
+  }
+}
+
+// Fetch the CSV from an already-cleared tab and import it.
+// Returns the fetchSjrViaTab outcome shape.
+async function finishSjrTabFetch(tabId, year) {
+  const fetched = await fetchSjrCsvInTab(tabId, year);
+  if (fetched.error) return { error: fetched.error, year, detail: fetched.detail || "" };
+  const done = await importSjrText(fetched.text, year);
+  if (!done.rows) {
+    return { error: "not-csv", year, detail: done.wrongYear
+      ? "wrong-year: SJR returned the " + done.wrongYear + " file for a " + year + " request"
+      : "downloaded text parsed to 0 rows (" + done.skipped + " skipped)" };
+  }
+  return { rows: done.rows, skipped: done.skipped, year, via: "browser-tab" };
+}
+
 async function fetchSjrViaTab(year) {
   let tabId = null;
   let outcome = null;
   try {
-    const tab = await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true });
-    tabId = tab.id;
+    // Background first, always. With clearance on record the
+    // poll is short (the page reads clean at once); without it
+    // the background gets longer, so a managed challenge that
+    // auto-clears on its own never forces a visible tab.
+    const clearance = await getSjrClearance();
+    const bgBudgetMs = FREE.sjrClearanceIsFresh(clearance && clearance.clearedAt) ? 10000 : 30000;
+    tabId = (await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })).id;
     await waitForTabLoad(tabId, 20000);
-    // Poll until the challenge clears (a managed challenge
-    // auto-solves in a real browser) — up to ~30s.
-    let cleared = false;
-    for (let i = 0; i < 15; i++) {
-      let text = "";
-      try { text = await readTabText(tabId); } catch (err) { break; }
-      if (text && text.length > 500 && !FREE.isChallengeText(text)) { cleared = true; break; }
-      await sleepMs(2000);
-    }
-    if (!cleared) { outcome = { error: "challenge", year }; return outcome; }
-    const fetched = await fetchSjrCsvInTab(tabId, year);
-    if (fetched.error) { outcome = { error: fetched.error, year, detail: fetched.detail || "" }; return outcome; }
-    const done = await importSjrText(fetched.text, year);
-    if (!done.rows) {
-      outcome = { error: "not-csv", year, detail: done.wrongYear
-        ? "wrong-year: SJR returned the " + done.wrongYear + " file for a " + year + " request"
-        : "downloaded text parsed to 0 rows (" + done.skipped + " skipped)" };
+    let state = await pollSjrTabForClearance(tabId, bgBudgetMs);
+    if (state === "cleared") {
+      await setSjrClearance();
+      outcome = await finishSjrTabFetch(tabId, year);
       return outcome;
     }
-    outcome = { rows: done.rows, skipped: done.skipped, year, via: "browser-tab" };
+    // The background tab hit a challenge (or never resolved):
+    // close it and force ONE visible tab for this year so the
+    // human can clear the check. This is the only case a
+    // visible tab opens.
+    if (tabId !== null) { try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ } tabId = null; }
+    tabId = (await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })).id;
+    await waitForTabLoad(tabId, 20000);
+    state = await pollSjrTabForClearance(tabId, 60000);
+    if (state === "cleared") {
+      await setSjrClearance();
+      outcome = await finishSjrTabFetch(tabId, year);
+      return outcome;
+    }
+    if (state === "challenge") { outcome = { error: "challenge", year }; return outcome; }
+    outcome = { error: "blocked", year, detail: "SJR page did not finish loading in the visible tab" };
     return outcome;
   } catch (err) {
     outcome = { error: "failed", year, detail: String(err && err.message || err) };
@@ -1056,3 +1119,4 @@ if (chrome.action && chrome.action.onClicked) {
 // Free data: check on every worker wake whether the yearly
 // auto-fetch is due (cheap: one storage read, then it stops).
 maybeAutoFetch();
+
