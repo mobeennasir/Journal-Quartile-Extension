@@ -37,10 +37,10 @@ const batchFileNameEl = document.getElementById("batch-file-name");
 const batchRunBtn = document.getElementById("batch-run");
 const batchTestsetBtn = document.getElementById("batch-testset");
 const batchStatusEl = document.getElementById("batch-status");
+const batchSjrStatusEl = document.getElementById("batch-sjr-status");
 const batchProgressEl = document.getElementById("batch-progress");
 const batchProgressBarEl = document.getElementById("batch-progress-bar");
 const batchResultsEl = document.getElementById("batch-results");
-const batchTbodyEl = document.getElementById("batch-tbody");
 const batchDownloadBtn = document.getElementById("batch-download");
 const jcrYearEl = document.getElementById("jcr-year");
 const jcrFileEl = document.getElementById("jcr-file");
@@ -135,13 +135,13 @@ async function ensureSjrYear(year) {
     let res = await sendBackgroundMessage({ type: "fetchSjrExport", year: y }, 90000);
     if (res && res.rows) {
       refreshImportStatus();
-      return { state: "fetched", year: y };
+      return { state: "fetched", year: y, rows: res.rows };
     }
     if (res && (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
       res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 120000);
       if (res && res.rows) {
         refreshImportStatus();
-        return { state: "fetched", year: y };
+        return { state: "fetched", year: y, rows: res.rows };
       }
       if (res && res.error === "challenge") return { state: "challenge", year: y };
       return { state: "blocked", year: y };
@@ -314,7 +314,7 @@ function rankingRows(data, rank, sjrNote) {
     rows.push(["Impact Factor — JCR (" + year + ")", "No JCR data for this year"]);
     rows.push(["SJR quartile — fallback, NOT JCR (" + year + ")",
       sjrNote === "not-released" ? "No SJR data for " + year + " yet"
-      : sjrNote === "blocked" ? "SJR download blocked — tap Get free SJR data"
+      : sjrNote === "blocked" ? "SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page"
       : "No SJR data for this year"]);
   }
   rows.push(["WoS category", wos ? wos + (wos === "W" ? " — SCIE, SSCI or AHCI" : " — ESCI (Emerging)") : "Unknown — checking free WoS list…"]);
@@ -338,8 +338,16 @@ async function showResult(data, sourceName, opts) {
     const ensured = await ensureSjrYear(parseInt(data.year, 10));
     if (ensured.state === "fetched" || ensured.state === "ready") {
       rank = await safeGetRank(data.issns, parseInt(data.year, 10));
+      if (ensured.state === "fetched" && statusEl) {
+        statusEl.textContent = `SJR ${data.year} saved${ensured.rows ? ", " + Number(ensured.rows).toLocaleString("en-US") + " rows" : ""}.`;
+      }
     } else if (ensured.state === "not-released" || ensured.state === "blocked" || ensured.state === "challenge") {
       sjrNote = ensured.state === "not-released" ? "not-released" : "blocked";
+      if (statusEl) {
+        statusEl.textContent = ensured.state === "not-released"
+          ? `No SJR data for ${data.year} yet.`
+          : `SJR ${data.year} could not be downloaded automatically — tap Get free SJR data or Open SJR download page.`;
+      }
       // Point the manual import at this year: set the SJR year
       // select to the article's year, so "Get free SJR data" and
       // "Import SJR file" below act on the year that is missing.
@@ -495,23 +503,31 @@ async function fetchJson(url) {
 function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 // Fetch one article by DOI: Crossref first, OpenAlex fallback.
-// Returns { data, sourceName } or null when not found. Results are
-// cached, so looking up the same DOI twice does not re-fetch.
+// Returns { data, sourceName } on success, or
+// { notFound: true, reason } on failure — reason "no-record"
+// when both APIs answered 404 (the DOI does not exist in
+// either), "network" when the check itself could not complete
+// (timeout / dropped connection / 5xx), so a failed check is
+// never reported as a missing article. Results are cached, so
+// looking up the same DOI twice does not re-fetch.
 async function fetchArticleByDoi(doi) {
   const run = async () => {
+    let saw404 = false, sawOther = false;
     try {
       const data = await fetchJson(
         `https://api.crossref.org/works/${encodeURIComponent(doi)}?mailto=${encodeURIComponent(MAILTO)}`
       );
       if (data && data.message) return { data: normaliseCrossref(data.message), sourceName: "Crossref" };
-    } catch (err) { /* fall through to OpenAlex */ }
+      saw404 = true; // 200 with no record: the DOI is not there
+    } catch (err) { if (err && err.status === 404) saw404 = true; else sawOther = true; }
     try {
       const work = await fetchJson(
         `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}?mailto=${encodeURIComponent(MAILTO)}`
       );
       if (work && work.display_name) return { data: normaliseOpenAlex(work), sourceName: "OpenAlex" };
-    } catch (err) { /* not found */ }
-    return null;
+      saw404 = true;
+    } catch (err) { if (err && err.status === 404) saw404 = true; else sawOther = true; }
+    return { notFound: true, reason: (!sawOther && saw404) ? "no-record" : "network" };
   };
   if (articleCache) return articleCache.getOrFetch("doi:" + doi.toLowerCase(), run);
   return run();
@@ -530,12 +546,22 @@ function titleOverlap(wanted, candidate) {
 }
 
 // Find an article by title (+ journal + year when known).
-// Returns { data, sourceName, resolvedBy } or null. Cached by
-// title + journal + year, so batch rows for the same article share
-// one search instead of re-fetching.
+// Returns { data, sourceName, resolvedBy } on success, or
+// { notFound: true, reason: "no-title-match", bestOverlap,
+// bestTitle } on failure — bestOverlap is the highest word
+// overlap any candidate reached (threshold 0.40), so the
+// caller can say how close the search came instead of a bare
+// "not found". Cached by title + journal + year, so batch rows
+// for the same article share one search instead of re-fetching.
 async function fetchArticleByTitle(title, journal, year) {
   const key = "title:" + String(title || "").toLowerCase() + "|" + String(journal || "").toLowerCase() + "|" + (year || "");
   const run = async () => {
+  let bestOverlap = 0, bestTitle = "";
+  const consider = (candidate) => {
+    const overlap = titleOverlap(title, candidate);
+    if (overlap > bestOverlap) { bestOverlap = overlap; bestTitle = candidate || ""; }
+    return overlap;
+  };
   // Crossref title search.
   try {
     const params = new URLSearchParams();
@@ -549,10 +575,10 @@ async function fetchArticleByTitle(title, journal, year) {
     const items = (data && data.message && data.message.items) || [];
     for (const item of items) {
       const candidateTitle = (item.title && item.title[0]) || "";
-      if (titleOverlap(title, candidateTitle) >= 0.4) {
+      if (consider(candidateTitle) >= 0.4) {
         // Re-fetch the full record so the normaliser sees all fields.
         const full = await fetchArticleByDoi(item.DOI);
-        if (full) { full.resolvedBy = "title search (Crossref)"; return full; }
+        if (full && full.data) { full.resolvedBy = "title search (Crossref)"; return full; }
         return { data: normaliseCrossref(item), sourceName: "Crossref", resolvedBy: "title search (Crossref)" };
       }
     }
@@ -567,12 +593,12 @@ async function fetchArticleByTitle(title, journal, year) {
     const data = await fetchJson(`https://api.openalex.org/works?${params.toString()}`);
     const items = (data && data.results) || [];
     for (const item of items) {
-      if (titleOverlap(title, item.display_name || item.title) >= 0.4) {
+      if (consider(item.display_name || item.title) >= 0.4) {
         return { data: normaliseOpenAlex(item), sourceName: "OpenAlex", resolvedBy: "title search (OpenAlex)" };
       }
     }
   } catch (err) { /* not found */ }
-  return null;
+  return { notFound: true, reason: "no-title-match", bestOverlap, bestTitle: bestTitle ? bestTitle.slice(0, 60) : "" };
   };
   if (articleCache) return articleCache.getOrFetch(key, run);
   return run();
@@ -583,7 +609,7 @@ async function lookup(doi) {
   resultEl.hidden = true;
   try {
     const found = await fetchArticleByDoi(doi);
-    if (found) {
+    if (found && found.data) {
       statusEl.textContent = "Found article. Checking ranking…";
       statusEl.classList.add("loading");
       await showResult(found.data, found.sourceName);
@@ -591,7 +617,11 @@ async function lookup(doi) {
       statusEl.classList.remove("loading");
       return;
     }
-    showError(`Not found: no record for ${doi} in Crossref or OpenAlex. Check the DOI and try again.`);
+    if (found && found.reason === "network") {
+      showError("Network error: could not reach Crossref or OpenAlex to check that DOI. Check your connection and try again.");
+    } else {
+      showError(`Not found: no record for ${doi} in Crossref or OpenAlex. Check the DOI and try again.`);
+    }
   } catch (err) {
     showError("Network error: could not reach Crossref or OpenAlex. Check your connection and try again.");
   } finally {
@@ -657,7 +687,7 @@ async function onLookupManualClick() {
   resultEl.hidden = true;
   try {
     const found = await fetchArticleByTitle(title, journal, year);
-    if (found) {
+    if (found && found.data) {
       statusEl.textContent = "Found article. Checking ranking…";
       const data = found.data;
       if (issn && (!data.issns || !data.issns.length)) {
@@ -670,7 +700,10 @@ async function onLookupManualClick() {
       statusEl.classList.remove("loading");
       return;
     }
-    showError(`Not found: no article matching that title in ${journal} (${year}). Check the title, journal and year.`);
+    const best = (found && found.bestOverlap)
+      ? ` (best match ${found.bestOverlap.toFixed(2)} word overlap, needs 0.40)`
+      : " (no candidates returned)";
+    showError(`Not found: no article matching that title in ${journal} (${year})${best}. Check the title, journal and year.`);
   } catch (err) {
     showError("Network error: could not reach Crossref or OpenAlex. Check your connection and try again.");
   } finally {
@@ -1230,7 +1263,7 @@ batchFileEl.addEventListener("change", async () => {
   }
 });
 
-function batchRowToResult(row, found, rank, note) {
+function batchRowToResult(row, found, rank, note, sjrState) {
   const data = found ? found.data : null;
   return {
     title: (data && data.title) || row.title || "",
@@ -1241,37 +1274,55 @@ function batchRowToResult(row, found, rank, note) {
     doi: (data && data.doi) || row.doi || "",
     rank: rank || { source: "none", quartile: "", jif: null, wosCategory: "" },
     note: note || "",
+    // Row outcome for the CSV "Status / note" column and the
+    // finished summary: "found", "duplicate" (same DOI as an
+    // earlier row), or "not-found" with notFoundKind naming why
+    // ("no-title-match" / "no-doi-record" / "no-doi-or-title" /
+    // "network"). No skipped row is left unexplained.
+    status: found ? "found" : "not-found",
+    notFoundKind: "",
+    // How this row's SJR year was obtained ("ready" = already
+    // stored, "fetched" = fresh download, "blocked" etc.) — the
+    // SJR cell says so instead of going blank.
+    sjrState: sjrState || "",
   };
 }
 
-function renderBatchRow(result) {
-  const tr = document.createElement("tr");
-  const rank = result.rank || {};
-  const cells = [
-    result.title, result.journal, result.year,
-    rank.source === "JCR" ? (rank.quartile || "—") : (rank.source === "SJR" ? "— (see SJR)" : "No JCR data"),
-    rank.source === "JCR" ? ((rank.jif === null || rank.jif === undefined) ? "—" : String(rank.jif)) : "No JCR data",
-    rank.wosCategory || "Unknown",
-    rank.source === "JCR" ? "JCR" : rank.source === "SJR" ? `SJR fallback — NOT JCR (${rank.quartile || ""}${result.year ? ", " + result.year : ""})` : (result.note || "Not found"),
-  ];
-  cells.forEach((text) => {
-    const td = document.createElement("td");
-    td.textContent = text;
-    tr.appendChild(td);
-  });
-  return tr;
+// No per-row table in the panel (user, 27 Nov 2026: the long
+// table just makes scrolling too much). Batch results live only
+// in the downloaded CSV — see DATA.resultsToCsv.
+
+// Live SJR status line under the batch status: one short outcome
+// per distinct year, so the user can see the auto-fetch working
+// (or blocked) instead of watching SJR tabs open and close.
+function updateBatchSjrStatus(outcomes) {
+  if (!batchSjrStatusEl) return;
+  const lines = [...outcomes.entries()].sort((a, b) => a[0] - b[0])
+    .map(([year, o]) => DATA.sjrOutcomeText(o.state, year, o.rows)).filter(Boolean);
+  batchSjrStatusEl.textContent = lines.length ? "SJR: " + lines.join("; ") + "." : "";
 }
 
 async function runBatch(rows) {
   batchResults = [];
-  batchTbodyEl.innerHTML = "";
-  batchResultsEl.hidden = false;
+  // No per-row table in the panel: during a batch the panel shows
+  // only the status line and progress bar. The results section
+  // (download button) stays hidden until the whole file finishes.
+  batchResultsEl.hidden = true;
   batchProgressEl.hidden = false;
+  // The download button must not be there until the whole file
+  // finishes: hiding it here also hides the previous batch's
+  // button when a new batch starts.
+  batchDownloadBtn.hidden = true;
+  if (batchMjlBtn) batchMjlBtn.hidden = true;
+  if (batchSjrStatusEl) batchSjrStatusEl.textContent = "";
   batchRunBtn.disabled = true;
   batchTestsetBtn.disabled = true;
   let resolvedDoi = 0, found = 0;
   const seenDois = new Map(); // DOI -> first row number (Scholar lists some works twice)
   const sjrYearsFetched = new Set(); // publication years whose SJR data was fetched during this run
+  const sjrYearOutcomes = new Map(); // year -> ensureSjrYear outcome (one attempt per distinct year)
+  let finished = false;
+  try {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     batchStatusEl.textContent = `Checking article ${i + 1} of ${rows.length}: ${row.title.slice(0, 60)}…`;
@@ -1279,13 +1330,35 @@ async function runBatch(rows) {
     let result;
     try {
       let article = null;
+      let notFoundReason = null; // { kind, detail } — every
+      // skipped row keeps its real reason, through to the CSV.
       if (row.doi) {
-        article = await fetchArticleByDoi(row.doi);
-        if (article) resolvedDoi++;
+        const byDoi = await fetchArticleByDoi(row.doi);
+        if (byDoi && byDoi.data) { article = byDoi; resolvedDoi++; }
+        else if (byDoi && byDoi.notFound) {
+          notFoundReason = byDoi.reason === "no-record"
+            ? { kind: "no-doi-record", detail: "no record for this DOI in Crossref or OpenAlex" }
+            : { kind: "network", detail: "could not reach Crossref or OpenAlex to check this DOI" };
+        }
       }
       if (!article && row.title) {
-        article = await fetchArticleByTitle(row.title, row.journal, row.year);
-        if (article) { resolvedDoi++; }
+        const byTitle = await fetchArticleByTitle(row.title, row.journal, row.year);
+        if (byTitle && byTitle.data) { article = byTitle; resolvedDoi++; }
+        else if (byTitle && byTitle.notFound) {
+          // Scholar list titles are sometimes truncated on the
+          // profile page — a truncated title can never match, so
+          // say so instead of a bare "not found".
+          const truncated = /[…\u2026]$|\.\.\.$/.test(String(row.title || "").trim());
+          notFoundReason = {
+            kind: "no-title-match",
+            detail: "no title match" + (byTitle.bestOverlap
+              ? " (best " + byTitle.bestOverlap.toFixed(2) + " overlap, needs 0.40)"
+              : " (no candidates returned)") + (truncated ? " — title looks truncated, try the full title" : ""),
+          };
+        }
+      }
+      if (!article && !row.doi && !row.title) {
+        notFoundReason = { kind: "no-doi-or-title", detail: "row has no DOI and no title to search" };
       }
       if (article) {
         found++;
@@ -1294,42 +1367,85 @@ async function runBatch(rows) {
           : (row.issn ? [row.issn] : []);
         const year = article.data.year ? parseInt(article.data.year, 10) : (row.year || null);
         let rank = (issns.length && year) ? await safeGetRank(issns, year) : null;
+        let sjrState = "";
+        if (rank && rank.source === "SJR") sjrState = "ready";
+        else if (rank && rank.source === "JCR") sjrState = "jcr";
         // No SJR row for this row's publication year? Fetch that
         // year now — the year comes from the article, never from
         // the user. ensureSjrYear fetches each distinct year once
-        // per run and skips years already stored.
+        // per run and skips years already stored; a year already
+        // tried in this run (e.g. blocked) is NOT tried again,
+        // so a blocked year does not open one SJR tab per article.
         if (rank && rank.source === "none" && year) {
-          batchStatusEl.textContent = `Checking article ${i + 1} of ${rows.length}: getting SJR data for ${year}…`;
-          const ensured = await ensureSjrYear(year);
+          let ensured;
+          if (sjrYearOutcomes.has(year)) {
+            ensured = sjrYearOutcomes.get(year);
+          } else {
+            batchStatusEl.textContent = `Checking article ${i + 1} of ${rows.length}: getting SJR data for ${year}…`;
+            ensured = await ensureSjrYear(year);
+            sjrYearOutcomes.set(year, ensured);
+            updateBatchSjrStatus(sjrYearOutcomes);
+          }
+          sjrState = ensured.state;
           if (ensured.state === "fetched") {
             sjrYearsFetched.add(year);
             rank = await safeGetRank(issns, year);
           }
         }
-        let note = article.resolvedBy || "";
+        let note = article.resolvedBy || "Found by DOI";
         const doiKey = (article.data.doi || "").toLowerCase();
+        let isDuplicate = false;
         if (doiKey) {
           if (seenDois.has(doiKey)) {
+            isDuplicate = true;
             note = (note ? note + ". " : "") + `Same article as row ${seenDois.get(doiKey)} (same DOI) — Scholar lists it twice`;
           } else {
             seenDois.set(doiKey, i + 1);
           }
         }
-        result = batchRowToResult(row, article, rank, note);
+        result = batchRowToResult(row, article, rank, note, sjrState);
+        if (isDuplicate) result.status = "duplicate";
       } else {
-        result = batchRowToResult(row, null, null, "Article not found in Crossref or OpenAlex");
+        result = batchRowToResult(row, null, null, "Not found — " + (notFoundReason ? notFoundReason.detail : "no record in Crossref or OpenAlex"));
+        result.notFoundKind = notFoundReason ? notFoundReason.kind : "no-title-match";
       }
     } catch (err) {
       result = batchRowToResult(row, null, null, "Network error: " + String(err.message || err));
+      result.notFoundKind = "network";
     }
     batchResults.push(result);
-    batchTbodyEl.appendChild(renderBatchRow(result));
+    // No table row: the panel just counts — "12 of 65 articles
+    // done" — and the per-row results live only in the CSV.
+    batchStatusEl.textContent = `${i + 1} of ${rows.length} articles done`;
     await sleep(500); // polite pacing for the Crossref polite pool
   }
+    finished = true;
+  } finally {
+    batchRunBtn.disabled = false;
+    batchTestsetBtn.disabled = false;
+  }
+  if (!finished) {
+    // The loop stopped early (unexpected error outside a row):
+    // results are incomplete, so the download stays hidden.
+    batchStatusEl.textContent = "Batch stopped early — results are incomplete, download is hidden.";
+    return;
+  }
+  // Only now, with every row done, is the download shown.
+  batchResultsEl.hidden = false;
+  batchDownloadBtn.hidden = false;
+  if (batchMjlBtn) batchMjlBtn.hidden = false;
   batchProgressBarEl.style.width = "100%";
-  batchStatusEl.textContent = `Done: ${rows.length} checked, ${found} found, ${resolvedDoi} with a DOI. ${batchResults.filter((r) => r.rank && r.rank.source === "JCR").length} with JCR data, ${batchResults.filter((r) => r.rank && r.rank.source === "SJR").length} SJR fallback only, ${batchResults.filter((r) => !r.rank || r.rank.source === "none").length} with no ranking data.${sjrYearsFetched.size ? ` SJR data fetched for ${[...sjrYearsFetched].sort().join(", ")}.` : ""}`;
-  batchRunBtn.disabled = false;
-  batchTestsetBtn.disabled = false;
+  updateBatchSjrStatus(sjrYearOutcomes);
+  // The summary adds up: found rows split into JCR / SJR /
+  // found-but-no-ranking, then every not-found row broken down
+  // by its real reason, then duplicates named separately.
+  const foundRows = batchResults.filter((r) => r.status === "found" || r.status === "duplicate");
+  const jcrCount = foundRows.filter((r) => r.rank && r.rank.source === "JCR").length;
+  const sjrCount = foundRows.filter((r) => r.rank && r.rank.source === "SJR").length;
+  const noRankCount = foundRows.length - jcrCount - sjrCount;
+  const notFoundText = DATA.notFoundBreakdown(batchResults);
+  const dupCount = batchResults.filter((r) => r.status === "duplicate").length;
+  batchStatusEl.textContent = `Done: ${rows.length} articles. ${foundRows.length} found (${jcrCount} JCR, ${sjrCount} SJR fallback, ${noRankCount} found but no ranking data)${notFoundText ? ", " + notFoundText : ""}.${dupCount ? ` ${dupCount} duplicate row${dupCount === 1 ? "" : "s"} of earlier rows.` : ""}${sjrYearsFetched.size ? ` SJR data fetched for ${[...sjrYearsFetched].sort().join(", ")}.` : ""}`;
   if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
     chrome.storage.local.set({ lastBatch: batchResults });
   }
@@ -1410,8 +1526,8 @@ if (batchMjlBtn) {
             }));
             await getStore().putMjl(rows, { fileName: "Master Journal List (automatic)", rows: rows.length, importedAt, expires: DATA.mjlExpiresAt(importedAt) });
           } catch (err) { /* the displayed value still stands */ }
-          const tr = batchTbodyEl.children[i];
-          if (tr && tr.children[5]) tr.children[5].textContent = res.category;
+          // No panel table any more: the enriched category lives
+          // in the downloaded CSV, not in a row on screen.
         }
         await sleep(300); // polite pacing for the MJL search
       }

@@ -76,16 +76,9 @@
         <button id="batch-testset" type="button" class="ghost">Use the Naqqash test set (67 articles)</button>
       </div>
       <p id="batch-status" class="status" aria-live="polite"></p>
+      <p id="batch-sjr-status" class="status" aria-live="polite"></p>
       <div id="batch-progress" class="progress" hidden><div id="batch-progress-bar" class="progress-bar"></div></div>
-      <div id="batch-results" class="batch-table-wrap" hidden>
-        <table id="batch-table" class="batch-table">
-          <thead><tr>
-            <th scope="col">Title</th><th scope="col">Journal</th><th scope="col">Year</th>
-            <th scope="col">JCR quartile (year)</th><th scope="col">Impact Factor — JCR (year)</th>
-            <th scope="col">WoS category</th><th scope="col">Source</th>
-          </tr></thead>
-          <tbody id="batch-tbody"></tbody>
-        </table>
+      <div id="batch-results" class="batch-actions" hidden>
         <button id="batch-download" type="button" class="primary">Download results as CSV</button>
         <button id="batch-mjl" type="button" class="ghost">Get WoS categories (free)</button>
       </div>

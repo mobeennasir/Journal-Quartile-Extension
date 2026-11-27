@@ -791,7 +791,7 @@
 
   var RESULTS_HEADER = ["Title", "Journal", "Year", "ISSN", "DOI",
     "JCR quartile (year)", "Impact Factor - JCR (year)", "WoS category",
-    "SJR quartile - fallback NOT JCR (year)", "Source", "Notes"];
+    "SJR quartile - fallback NOT JCR (year)", "Source", "Status / note"];
 
   function resultRowToCsv(result) {
     const rank = result.rank || {};
@@ -811,6 +811,51 @@
 
   function resultsToCsv(results) {
     return rowsToCsv(RESULTS_HEADER, (results || []).map(resultRowToCsv));
+  }
+
+  // ---------- Batch SJR outcome text (pure, unit-tested) ----------
+  // One short line per SJR year outcome in a batch: whether that
+  // year's data came from the store, a fresh download, or is
+  // missing — so the user can see the auto-fetch actually worked
+  // instead of watching tabs open and close.
+  function sjrOutcomeText(state, year, rows) {
+    switch (state) {
+      case "ready": return "SJR " + year + " already saved";
+      case "fetched": return "SJR " + year + " saved" + (rows ? ", " + Number(rows).toLocaleString("en-US") + " rows" : "");
+      case "blocked": case "challenge": case "failed": return "SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page";
+      case "not-released": return "No SJR data for " + year + " yet";
+      default: return "";
+    }
+  }
+
+  // ---------- Batch not-found breakdown (pure, unit-tested) ----------
+  // Short labels for the per-row not-found reasons, for the
+  // finished batch summary line. kind is stored on the result as
+  // notFoundKind; status "not-found" is what gets counted.
+  // "8 not found: 5 no title match, 2 no record for DOI, 1 no
+  // DOI or title" — or "" when nothing was not found.
+  var NOT_FOUND_LABELS = {
+    "no-title-match": "no title match",
+    "no-doi-record": "no record for DOI",
+    "no-doi-or-title": "no DOI or title",
+    "network": "network error",
+  };
+
+  function notFoundBreakdown(results) {
+    const counts = {};
+    let total = 0;
+    (results || []).forEach((r) => {
+      if (r && r.status === "not-found") {
+        total++;
+        const k = r.notFoundKind || "no-title-match";
+        counts[k] = (counts[k] || 0) + 1;
+      }
+    });
+    if (!total) return "";
+    const order = ["no-title-match", "no-doi-record", "no-doi-or-title", "network"];
+    const parts = order.filter((k) => counts[k]).map((k) => counts[k] + " " + (NOT_FOUND_LABELS[k] || k));
+    Object.keys(counts).filter((k) => order.indexOf(k) === -1).sort().forEach((k) => parts.push(counts[k] + " " + (NOT_FOUND_LABELS[k] || k)));
+    return total + " not found: " + parts.join(", ");
   }
 
   // ---------- JCR expiry ----------
@@ -926,6 +971,7 @@
     MemoryStore: MemoryStore, IdbStore: IdbStore,
     lookupRankSync: lookupRankSync,
     RESULTS_HEADER: RESULTS_HEADER, resultsToCsv: resultsToCsv,
+    sjrOutcomeText: sjrOutcomeText, notFoundBreakdown: notFoundBreakdown,
     nextJcrExpiry: nextJcrExpiry,
     sjrExpiresAt: sjrExpiresAt, mjlExpiresAt: mjlExpiresAt,
     expiryMonthLabel: expiryMonthLabel,

@@ -157,7 +157,7 @@ async function main() {
     rank: { source: "JCR", quartile: "Q1", jif: 38.138, wosCategory: "W" }, note: "",
   }];
   const outCsv = DATA.resultsToCsv(sample);
-  check("export header has labelled columns", outCsv.startsWith("Title,Journal,Year,ISSN,DOI,JCR quartile (year),Impact Factor - JCR (year),WoS category,SJR quartile - fallback NOT JCR (year),Source,Notes"));
+  check("export header has labelled columns", outCsv.startsWith("Title,Journal,Year,ISSN,DOI,JCR quartile (year),Impact Factor - JCR (year),WoS category,SJR quartile - fallback NOT JCR (year),Source,Status / note"));
   check("export row carries JCR values", outCsv.indexOf("Q1,38.138,W") !== -1, outCsv.trim());
 
   console.log("== 13. Live Crossref DOI lookups (6 known DOIs) ==");
@@ -234,9 +234,15 @@ async function main() {
     "Look up", "Upload and check all articles", "Import JCR file",
     "Download results as CSV", "Use the Naqqash test set (67 articles)",
     "Data year this export covers",
-    "JCR quartile (year)", "Impact Factor — JCR (year)",
   ];
   requiredLabels.forEach((label) => check(`label present: "${label}"`, html2.indexOf(label) !== -1));
+  // "JCR quartile (year)" / "Impact Factor — JCR (year)" were
+  // batch-table headers (table removed 27 Nov 2026); the labels
+  // still appear in the single-lookup result rows (popup.js).
+  const popupJsEarly = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  check("single-lookup result still labels the JCR quartile and IF with the year",
+    popupJsEarly.indexOf('"JCR quartile (" + year + ")"') !== -1
+    && popupJsEarly.indexOf('"Impact Factor — JCR (" + year + ")"') !== -1);
   // Merged 27 Nov 2026: "Lookup by DOI" and "Lookup by article link"
   // are no longer separate tabs. One option, "DOI or article link",
   // accepts a bare DOI, a doi.org link, or a publisher article URL.
@@ -394,7 +400,9 @@ async function main() {
   check("popup.js shows live status while checking the ranking", popupJs.indexOf("Found article. Checking ranking") !== -1);
   check("popup.js publisher fetch has a 10s timeout", popupJs.indexOf("setTimeout(() => controller.abort(), 10000)") !== -1);
   check("popup.js falls back to in-memory storage with a note", popupJs.indexOf("showStorageFallbackNote()") !== -1);
-  check("batch renders each row as it arrives", popupJs.indexOf("batchTbodyEl.appendChild(renderBatchRow(result))") !== -1);
+  check("batch renders NO rows in the panel (table removed 27 Nov 2026: rows live only in the CSV)",
+    popupJs.indexOf("batchTbodyEl") === -1 && popupJs.indexOf("renderBatchRow") === -1
+    && panelHtml.indexOf("batch-table") === -1 && panelHtml.indexOf("batch-tbody") === -1);
   check("sidepanel loads net.js", panelHtml.indexOf('<script src="net.js"></script>') !== -1);
   check("sidepanel has a storage-fallback note element", panelHtml.indexOf('id="storage-note"') !== -1);
 
@@ -435,8 +443,8 @@ async function main() {
   check("sjrLatestYear: Jan 2027 -> 2025 (June not yet passed)", FREE.sjrLatestYear(new Date("2027-01-15")) === 2025);
   check("sjrLatestYear: Jul 2027 -> 2026", FREE.sjrLatestYear(new Date("2027-07-01")) === 2026);
   check("sjrLatestYear: Jun 2027 -> 2026", FREE.sjrLatestYear(new Date("2027-06-01")) === 2026);
-  check("sjrExportUrl uses out=csv", FREE.sjrExportUrl(2025) === "https://www.scimagojr.com/journalrank.php?year=2025&type=j&out=csv");
-  check("sjrExportUrlAlt uses export=csv", FREE.sjrExportUrlAlt(2025) === "https://www.scimagojr.com/journalrank.php?year=2025&type=j&export=csv");
+  check("sjrExportUrl uses out=xls (verified working spelling, 27 Nov 2026)", FREE.sjrExportUrl(2025) === "https://www.scimagojr.com/journalrank.php?year=2025&out=xls");
+  check("sjrExportUrlAlt uses out=csv (no type=j)", FREE.sjrExportUrlAlt(2025) === "https://www.scimagojr.com/journalrank.php?year=2025&out=csv");
   check("isSjrCsv accepts a real SJR header", FREE.isSjrCsv("Rank;Title;Issn;SJR;SJR Best Quartile;H index\n1;Nature;0028-0836;17.5;Q1;500"));
   check("isSjrCsv rejects an HTML page", !FREE.isSjrCsv("<!DOCTYPE html><html><body>Verify you are human</body></html>"));
   check("isSjrCsv rejects text without the SJR columns", !FREE.isSjrCsv("Rank,Title,Publisher\n1,Nature,Springer"));
@@ -564,7 +572,8 @@ async function main() {
   check("checkbox toggle has its own rule (not the full-width input style)",
     /\.toggle\s*\{[^}]*display:\s*flex/.test(css) && /\.toggle input\s*\{[^}]*width:\s*auto/.test(css));
   check("sections are divided by a thin rule", css.indexOf("main > section + section") !== -1);
-  check("batch table has zebra rows for scanning", css.indexOf("tbody tr:nth-child(even)") !== -1);
+  check("batch table CSS removed with the table (no dead .batch-table rules)",
+    css.indexOf(".batch-table") === -1 && css.indexOf(".batch-actions") !== -1);
   check("result card is lifted with a soft shadow", /\.result\s*\{[^}]*box-shadow:\s*0 1px 4px/.test(css));
   check("mode tabs and ghost buttons meet a 36px tap target",
     /\.mode-tab\s*\{[^}]*min-height:\s*40px/.test(css) && /\.ghost\s*\{[^}]*min-height:\s*36px/.test(css));
@@ -589,8 +598,8 @@ async function main() {
   check("MJL rendered text: 0 results is not-indexed", FREE.parseMjlSearchHtml(mjlRenderedZero).found === "not-indexed");
   check("freedata exposes the SJR ranking page URL for the tab fetch",
     FREE.sjrRankPageUrl(2025) === "https://www.scimagojr.com/journalrank.php?year=2025");
-  check("freedata sjrExportUrls returns both spellings",
-    eq(FREE.sjrExportUrls(2025), ["https://www.scimagojr.com/journalrank.php?year=2025&type=j&out=csv", "https://www.scimagojr.com/journalrank.php?year=2025&type=j&export=csv"]));
+  check("freedata sjrExportUrls returns the verified spellings (out=xls first)",
+    eq(FREE.sjrExportUrls(2025), ["https://www.scimagojr.com/journalrank.php?year=2025&out=xls", "https://www.scimagojr.com/journalrank.php?year=2025&out=csv", "https://www.scimagojr.com/journalrank.php?download=csv&year=2025"]));
   // ROOT CAUSE 2 (SJR): Cloudflare 403s automated fetches
   // (verified live from this VM for both URL spellings).
   check("looksBlocked: SJR Cloudflare challenge page is a block",
@@ -734,11 +743,11 @@ async function main() {
     popupJs.indexOf('showResult(last.data, last.sourceName || "Crossref", { autoFetchSjr: false })') !== -1);
   check("popup SJR row says plainly when the year's data is not released yet",
     popupJs.indexOf('"No SJR data for " + year + " yet"') !== -1);
-  check("popup SJR row says plainly when the download was blocked",
-    popupJs.indexOf('"SJR download blocked — tap Get free SJR data"') !== -1);
+  check("popup SJR row says plainly when the download could not be done automatically",
+    popupJs.indexOf('"SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page"') !== -1);
   check("popup batch fetches each row's publication year when its rank is missing",
     popupJs.indexOf('if (rank && rank.source === "none" && year)') !== -1
-    && popupJs.indexOf("const ensured = await ensureSjrYear(year)") !== -1
+    && popupJs.indexOf("await ensureSjrYear(year)") !== -1
     && popupJs.indexOf("sjrYearsFetched.add(year)") !== -1);
   check("popup batch final status lists the SJR years fetched",
     popupJs.indexOf("SJR data fetched for ${[...sjrYearsFetched].sort().join(") !== -1);
@@ -804,14 +813,209 @@ async function main() {
     popupJs.indexOf('rows.push(["SJR data", "Saved for " + year])') !== -1);
   check("popup sets the SJR year select to the article's year when the fetch is blocked",
     popupJs.indexOf("sjrYearEl.value = String(data.year)") !== -1);
-  check("popup batch SJR cell shows the year next to the quartile",
-    popupJs.indexOf('SJR fallback — NOT JCR (${rank.quartile || ""}${result.year ? ", " + result.year : ""})') !== -1);
+  check("batch results CSV carries the SJR quartile + year (the panel table is gone, the CSV is the only per-row view)",
+    DATA.RESULTS_HEADER.indexOf("SJR quartile - fallback NOT JCR (year)") !== -1
+    && DATA.resultsToCsv([{ title: "T", journal: "J", year: "2021", issn: "", doi: "", rank: { source: "SJR", quartile: "Q1", jif: null, wosCategory: "W" }, note: "" }]).indexOf("Q1") !== -1);
   check("popup manual SJR import reads the year from the file name",
     popupJs.indexOf("year: DATA.parseYear(file.name)") !== -1);
   check("popup import failure names how many rows were read but skipped",
     popupJs.indexOf("row(s) read but skipped") !== -1);
   check("background auto-fetch failure names how many rows were skipped",
     bgJs.indexOf("SJR file had no usable rows (${done.skipped} skipped)") !== -1);
+
+  console.log("== 27. Batch Download button only after the whole file finishes (27 Nov 2026) ==");
+  // User report: the "Download results as CSV" button was visible
+  // while the batch was still on article 2 or 3. Root cause:
+  // runBatch unhid the whole #batch-results section (button
+  // included) before the first row was checked. The button is
+  // now hidden at batch start and shown only after the last row.
+  const runBatchSrc = popupJs.slice(popupJs.indexOf("async function runBatch"));
+  check("runBatch hides the download button at the start (so a new batch hides the old one)",
+    runBatchSrc.indexOf("batchDownloadBtn.hidden = true") !== -1
+    && runBatchSrc.indexOf("batchDownloadBtn.hidden = true") < runBatchSrc.indexOf("for (let i = 0; i < rows.length; i++)"));
+  check("runBatch shows the download button only after the loop, guarded by a finished flag",
+    runBatchSrc.indexOf("if (!finished)") !== -1
+    && runBatchSrc.indexOf("batchDownloadBtn.hidden = false") !== -1
+    && runBatchSrc.indexOf("batchDownloadBtn.hidden = false") > runBatchSrc.indexOf("if (!finished)"));
+  check("runBatch re-enables the run buttons in a finally, so a stopped batch does not strand them disabled",
+    runBatchSrc.indexOf("} finally {") !== -1
+    && runBatchSrc.indexOf("batchRunBtn.disabled = false") !== -1);
+  check("runBatch on an early stop says the results are incomplete and the download is hidden",
+    runBatchSrc.indexOf("Batch stopped early") !== -1);
+  check("download click still guards against an empty batch (no partial CSV from a single lookup)",
+    popupJs.indexOf("if (!batchResults.length) return;") !== -1);
+  check("single-lookup path never touches the batch download button (only its getElementById declaration sits before runBatch)",
+    popupJs.slice(0, popupJs.indexOf("async function runBatch")).split("batchDownloadBtn").length === 2
+    && popupJs.slice(0, popupJs.indexOf("async function runBatch")).indexOf('getElementById("batch-download")') !== -1);
+
+  console.log("== 28. Batch: no row table in the panel, results only in the CSV (27 Nov 2026) ==");
+  // User correction: the long empty table just makes scrolling
+  // too much. During/after a batch the panel shows only the
+  // live status ("12 of 65 articles done"), the progress bar,
+  // the SJR status line, and the download button when done.
+  // The per-row results (SJR quartile + year, JCR quartile,
+  // IF, WoS category, source) live ONLY in the downloaded CSV.
+  check("panel has no batch table or tbody any more",
+    panelHtml.indexOf("batch-table") === -1 && panelHtml.indexOf("batch-tbody") === -1);
+  check("runBatch hides the results section at the start and shows it only after the last row",
+    runBatchSrc.indexOf("batchResultsEl.hidden = true") !== -1
+    && runBatchSrc.indexOf("batchResultsEl.hidden = false") !== -1
+    && runBatchSrc.indexOf("batchResultsEl.hidden = false") > runBatchSrc.indexOf("if (!finished)"));
+  check("runBatch shows a live 'N of M articles done' status per row, not a table row",
+    runBatchSrc.indexOf("`${i + 1} of ${rows.length} articles done`") !== -1
+    && runBatchSrc.indexOf("appendChild(renderBatchRow") === -1);
+  check("runBatch final status is one short summary line",
+    runBatchSrc.indexOf("`Done: ${rows.length} articles.") !== -1);
+  check("WoS button handler no longer touches table rows (no children[] index to go stale)",
+    popupJs.indexOf("tr.children") === -1 && popupJs.indexOf("batchTbodyEl") === -1);
+  check("batch SJR status line exists in the panel and is cleared at batch start",
+    panelHtml.indexOf('id="batch-sjr-status"') !== -1
+    && runBatchSrc.indexOf('if (batchSjrStatusEl) batchSjrStatusEl.textContent = ""') !== -1);
+  // Per-year SJR outcomes, honest and visible.
+  check("sjrOutcomeText: ready = already saved, fetched names the row count",
+    DATA.sjrOutcomeText("ready", 2021) === "SJR 2021 already saved"
+    && DATA.sjrOutcomeText("fetched", 2021, 51835) === "SJR 2021 saved, 51,835 rows");
+  check("sjrOutcomeText: blocked/challenge/failed say plainly the auto-download failed and name both manual buttons",
+    DATA.sjrOutcomeText("blocked", 2021) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page"
+    && DATA.sjrOutcomeText("challenge", 2021) === DATA.sjrOutcomeText("blocked", 2021)
+    && DATA.sjrOutcomeText("failed", 2021) === DATA.sjrOutcomeText("blocked", 2021));
+  check("sjrOutcomeText: not-released names the year",
+    DATA.sjrOutcomeText("not-released", 2026) === "No SJR data for 2026 yet");
+  check("runBatch does not re-try a year already tried in this run (one SJR tab per year, not per article)",
+    runBatchSrc.indexOf("sjrYearOutcomes.has(year)") !== -1
+    && runBatchSrc.indexOf("sjrYearOutcomes.set(year, ensured)") !== -1
+    && runBatchSrc.indexOf("updateBatchSjrStatus(sjrYearOutcomes)") !== -1);
+  check("ensureSjrYear returns the fetched row count so the status can prove the download",
+    popupJs.indexOf('return { state: "fetched", year: y, rows: res.rows }') !== -1);
+  // CSV is the only per-row view: every row and every column.
+  const csvResults = [
+    { title: "A", journal: "J1", year: "2021", issn: "0000-0001", doi: "10.1/a", rank: { source: "JCR", quartile: "Q2", jif: 5.07, wosCategory: "W" }, note: "" },
+    { title: "B", journal: "J2", year: "2021", issn: "0000-0002", doi: "10.1/b", rank: { source: "SJR", quartile: "Q1", jif: null, sjr: 2.5, wosCategory: "W" }, note: "" },
+    { title: "C", journal: "J3", year: "2019", issn: "", doi: "", rank: { source: "none", quartile: "", jif: null, wosCategory: "" }, note: "Not found" },
+  ];
+  const csvParsed = DATA.parseCsv(DATA.resultsToCsv(csvResults));
+  check("batch CSV: header + all 3 rows, SJR quartile in the SJR column, JCR quartile in the JCR column",
+    csvParsed.length === 4
+    && csvParsed[0].indexOf("SJR quartile - fallback NOT JCR (year)") === 8
+    && csvParsed[1][5] === "Q2" && csvParsed[2][8] === "Q1" && csvParsed[3][0] === "C",
+    JSON.stringify(csvParsed));
+
+  console.log("== 29. SJR auto-download: out=xls is the working export URL (27 Nov 2026) ==");
+  // ROOT CAUSE of the open-close-without-download: the extension
+  // fetched ?type=j&out=csv and ?type=j&export=csv, but a plain
+  // GET of either returns the HTML ranking page, not a CSV
+  // (verified with the page crawler, both spellings). The
+  // site's own Download button points to ?year=Y&out=xls, and
+  // that URL returns the full semicolon CSV (verified: the 2023
+  // file, 86,207 lines). The validation correctly rejected the
+  // HTML, so the tab opened, loaded, fetched HTML twice, and
+  // closed with no data — exactly the user's symptom.
+  check("sjrExportUrls: out=xls first, then out=csv, then download=csv — no type=j, no export=csv",
+    eq(FREE.sjrExportUrls(2023), [
+      "https://www.scimagojr.com/journalrank.php?year=2023&out=xls",
+      "https://www.scimagojr.com/journalrank.php?year=2023&out=csv",
+      "https://www.scimagojr.com/journalrank.php?download=csv&year=2023",
+    ]), JSON.stringify(FREE.sjrExportUrls(2023)));
+  const sjrPageHtml = '<a href="/journalrank.php?year=2023&out=xls"><img src="x.svg">Download</a><a href="https://example.com/other">Other</a><a href="journalrank.php?year=2023">Rankings</a>';
+  check("findSjrDownloadLinks: the site's own Download link, resolved absolute, others ignored",
+    eq(FREE.findSjrDownloadLinks(sjrPageHtml), ["https://www.scimagojr.com/journalrank.php?year=2023&out=xls"]),
+    JSON.stringify(FREE.findSjrDownloadLinks(sjrPageHtml)));
+  check("findSjrDownloadLinks: no download links gives an empty list, not a crash",
+    eq(FREE.findSjrDownloadLinks("<p>no links here</p>"), []));
+  check("background in-tab fetch reads the site's Download link from the rendered page before the hardcoded list",
+    bgJs.indexOf('document.querySelectorAll("a[href]")') !== -1
+    && bgJs.indexOf("out=(xls|csv)|download=csv") !== -1);
+  check("background in-tab fetch reports per-attempt diagnosis (csv/html/http-error/timeout), not a bare blocked",
+    bgJs.indexOf('kind: "html"') !== -1 && bgJs.indexOf('kind: "http-error"') !== -1
+    && bgJs.indexOf('detail: "no candidate returned the CSV: "') !== -1);
+  check("background worker direct fetch uses the same verified URL list",
+    bgJs.indexOf("const urls = FREE.sjrExportUrls(year);") !== -1);
+  check("background tab fetch passes the diagnosis detail through to the caller",
+    bgJs.indexOf('detail: fetched.detail') !== -1);
+  check("background import failure names the 0-row parse instead of a bare not-csv",
+    bgJs.indexOf('detail: "downloaded text parsed to 0 rows ("') !== -1);
+
+  console.log("== 30. Batch: every skipped row carries its reason, in the CSV and the summary (27 Nov 2026) ==");
+  // The user's batch said "Done: 65 checked, 57 found" and the 8
+  // skipped rows were unexplained. The real skip paths in runBatch
+  // are: DOI given but no record in either API, title search with
+  // no candidate over the 0.40 overlap threshold, a row with
+  // neither DOI nor title, a network error, and a duplicate DOI
+  // (found, but the same article as an earlier row). Each one now
+  // keeps its reason on the result (status + notFoundKind) through
+  // to the CSV "Status / note" column and the finished summary.
+  const skipped = [
+    { title: "Truncated title on Scholar…", journal: "Nature", year: "2021", issn: "", doi: "",
+      rank: { source: "none", quartile: "", jif: null, wosCategory: "" },
+      note: "Not found — no title match (best 0.31 overlap, needs 0.40) — title looks truncated, try the full title",
+      status: "not-found", notFoundKind: "no-title-match", sjrState: "" },
+    { title: "Second paper", journal: "Cell", year: "2020", issn: "", doi: "10.9999/does-not-exist",
+      rank: { source: "none", quartile: "", jif: null, wosCategory: "" },
+      note: "Not found — no record for this DOI in Crossref or OpenAlex",
+      status: "not-found", notFoundKind: "no-doi-record", sjrState: "" },
+    { title: "Third paper", journal: "", year: "", issn: "", doi: "",
+      rank: { source: "none", quartile: "", jif: null, wosCategory: "" },
+      note: "Not found — row has no DOI and no title to search",
+      status: "not-found", notFoundKind: "no-doi-or-title", sjrState: "" },
+    { title: "Fourth paper", journal: "Science", year: "2019", issn: "", doi: "",
+      rank: { source: "none", quartile: "", jif: null, wosCategory: "" },
+      note: "Network error: Request timed out",
+      status: "not-found", notFoundKind: "network", sjrState: "" },
+    { title: "Deep learning", journal: "Nature", year: "2015", issn: "0028-0836", doi: "10.1038/nature14539",
+      rank: { source: "JCR", quartile: "Q1", jif: 38.138, wosCategory: "W" },
+      note: "Found by DOI", status: "found", notFoundKind: "", sjrState: "" },
+    { title: "Deep learning (again)", journal: "Nature", year: "2015", issn: "0028-0836", doi: "10.1038/nature14539",
+      rank: { source: "JCR", quartile: "Q1", jif: 38.138, wosCategory: "W" },
+      note: "Found by DOI. Same article as row 5 (same DOI) — Scholar lists it twice",
+      status: "duplicate", notFoundKind: "", sjrState: "" },
+  ];
+  check("notFoundBreakdown: 4 not found, broken down by real reason",
+    DATA.notFoundBreakdown(skipped) === "4 not found: 1 no title match, 1 no record for DOI, 1 no DOI or title, 1 network error",
+    DATA.notFoundBreakdown(skipped));
+  check("notFoundBreakdown: duplicates are not counted as not found",
+    DATA.notFoundBreakdown(skipped).indexOf("duplicate") === -1);
+  check("notFoundBreakdown: nothing skipped gives an empty string",
+    DATA.notFoundBreakdown(skipped.filter((r) => r.status !== "not-found")) === "");
+  check("notFoundBreakdown: unknown kind is still shown, not dropped",
+    DATA.notFoundBreakdown([{ status: "not-found", notFoundKind: "weird-kind" }]) === "1 not found: 1 weird-kind");
+  const skippedCsv = DATA.resultsToCsv(skipped);
+  check("CSV Status / note column carries each skipped row's reason",
+    skippedCsv.indexOf("no title match (best 0.31 overlap, needs 0.40)") !== -1
+    && skippedCsv.indexOf("no record for this DOI in Crossref or OpenAlex") !== -1
+    && skippedCsv.indexOf("row has no DOI and no title to search") !== -1
+    && skippedCsv.indexOf("Network error: Request timed out") !== -1
+    && skippedCsv.indexOf("Same article as row 5 (same DOI)") !== -1);
+  check("CSV still has every row and every column (6 rows, 11 columns)",
+    skippedCsv.trim().split("\n").length === 7
+    && skippedCsv.trim().split("\n").every((line) => line.split(",").length >= 11));
+  check("runBatch records a notFoundKind on the not-found result and a duplicate status on the repeat DOI",
+    popupJs.indexOf('result.notFoundKind = notFoundReason ? notFoundReason.kind : "no-title-match"') !== -1
+    && popupJs.indexOf('result.status = "duplicate"') !== -1
+    && popupJs.indexOf('result.notFoundKind = "network"') !== -1);
+  check("runBatch detects a truncated Scholar title (ends with … or ...) and says so in the reason",
+    popupJs.indexOf('/[…\\u2026]$|\\.\\.\\.$/') !== -1
+    && popupJs.indexOf("title looks truncated, try the full title") !== -1);
+  check("runBatch distinguishes a DOI with no record from a failed check (network)",
+    popupJs.indexOf('kind: "no-doi-record"') !== -1
+    && popupJs.indexOf('kind: "network", detail: "could not reach Crossref or OpenAlex to check this DOI"') !== -1);
+  check("runBatch distinguishes a row with no DOI and no title from a failed title search",
+    popupJs.indexOf('kind: "no-doi-or-title"') !== -1);
+  check("fetchArticleByDoi returns no-record only when both APIs 404, network otherwise",
+    popupJs.indexOf('return { notFound: true, reason: (!sawOther && saw404) ? "no-record" : "network" };') !== -1
+    && popupJs.indexOf("err.status === 404") !== -1);
+  check("fetchArticleByTitle returns the best overlap so the reason can say how close it came",
+    popupJs.indexOf('return { notFound: true, reason: "no-title-match", bestOverlap, bestTitle:') !== -1);
+  check("single DOI lookup tells a network failure apart from a missing DOI",
+    popupJs.indexOf('found.reason === "network"') !== -1
+    && popupJs.indexOf("could not reach Crossref or OpenAlex to check that DOI") !== -1);
+  check("single title lookup shows the best overlap in its not-found message",
+    popupJs.indexOf("best match ${found.bestOverlap.toFixed(2)} word overlap, needs 0.40") !== -1);
+  check("finished batch summary breaks the not-found count down by reason and names duplicates",
+    popupJs.indexOf("DATA.notFoundBreakdown(batchResults)") !== -1
+    && popupJs.indexOf("duplicate row") !== -1
+    && popupJs.indexOf("found but no ranking data") !== -1);
+  check("finished summary counts no-ranking only among found rows, not the not-found rows",
+    popupJs.indexOf('const foundRows = batchResults.filter((r) => r.status === "found" || r.status === "duplicate");') !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));
