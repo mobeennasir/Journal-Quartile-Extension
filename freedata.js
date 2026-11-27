@@ -338,8 +338,68 @@
     return now - t >= 0 && now - t < SJR_CLEARANCE_TTL_MS;
   }
 
+  // ---------- HEC fallback (Y via DOAJ) ----------
+  // HEC Policy 2024 v2.0: Y covers journals in Scopus, MEDLINE,
+  // CNKI, DOAJ, or HEC-recommended lists (other than WoS, which
+  // is W/X). There is no importable HEC list for international
+  // journals — HEC publishes the national list as a PDF, and
+  // international categories are derived from the indexing
+  // agencies — so the verified automatic route for Y is the
+  // DOAJ API, free and unauthenticated (verified live 27 Nov
+  // 2026: GET https://doaj.org/api/search/journals/issn:{issn}
+  // returns {"total": 1, "results": [...]} for a listed journal,
+  // {"total": 0, "results": []} when it is not listed; no key,
+  // no published rate limit). A DOAJ-listed journal is HEC Y.
+  // CNKI and MEDLINE have no free public ISSN lookup the
+  // extension can call, so they are NOT checked — a journal in
+  // CNKI but not DOAJ stays "not ranked" rather than getting an
+  // invented Y. HJRS list files can still be imported by hand
+  // (see parseHecText in jcr.js).
+  var DOAJ_SEARCH_BASE = "https://doaj.org/api/search/journals/issn:";
+
+  function doajJournalUrl(issnCompact) {
+    return DOAJ_SEARCH_BASE + encodeURIComponent(formatIssnHyphen(issnCompact) || String(issnCompact || ""));
+  }
+
+  // DOAJ journal-search response (parsed JSON): listed when
+  // total > 0 with at least one result; title from the first
+  // result's bibjson. Anything else (total 0, no results,
+  // malformed) is "not listed", never an error to invent from.
+  function parseDoajResponse(json) {
+    const out = { listed: false, title: "" };
+    if (!json || typeof json !== "object") return out;
+    const total = json.total | 0;
+    const results = Array.isArray(json.results) ? json.results : [];
+    if (total > 0 && results.length) {
+      out.listed = true;
+      const b = results[0] && results[0].bibjson;
+      out.title = (b && (b.title || "")) || "";
+    }
+    return out;
+  }
+
+  // ---------- MJL "not indexed" stability ----------
+  // ROOT CAUSE of the 3 missed SCIE journals (27 Nov 2026):
+  // the MJL search page is an Angular app whose results pane
+  // first renders "Found 0 results" BEFORE the search API
+  // returns — the old tab poll accepted "not-indexed" on the
+  // very first reading, so a slow render became a false
+  // "not in WoS" for journals that ARE indexed (Saudi Journal
+  // of Biological Sciences 1319-562X, Microorganisms 2076-2607,
+  // Biology and Fertility of Soils 0178-2762/1432-0789 all
+  // returned no category in the user's batch). A "not indexed"
+  // reading is only accepted when it is STABLE: seen on two
+  // consecutive polls (4s apart) and at least 8s after the page
+  // loaded. A single early "0 results" is ignored.
+  function mjlNotIndexedIsStable(consecutiveNotIndexed, elapsedMs) {
+    return (consecutiveNotIndexed | 0) >= 2 && (elapsedMs | 0) >= 8000;
+  }
+
   const api = {
     mjlSearchUrl: mjlSearchUrl,
+    doajJournalUrl: doajJournalUrl,
+    parseDoajResponse: parseDoajResponse,
+    mjlNotIndexedIsStable: mjlNotIndexedIsStable,
     sjrRankPageUrl: sjrRankPageUrl,
     isChallengeText: isChallengeText,
     sjrClearanceIsFresh: sjrClearanceIsFresh,

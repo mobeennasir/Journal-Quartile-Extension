@@ -157,7 +157,7 @@ async function main() {
     rank: { source: "JCR", quartile: "Q1", jif: 38.138, wosCategory: "W" }, note: "",
   }];
   const outCsv = DATA.resultsToCsv(sample);
-  check("export header has labelled columns", outCsv.startsWith("Title,Journal,Year,ISSN,DOI,JCR quartile (year),Impact Factor - JCR (year),WoS category,SJR quartile - fallback NOT JCR (year),Source,Status / note"));
+  check("export header has labelled columns", outCsv.startsWith("Title,Journal,Year,ISSN,DOI,JCR quartile (year),Impact Factor - JCR (year),WoS category,HEC category,SJR quartile - fallback NOT JCR (year),Source,Status / note"));
   check("export row carries JCR values", outCsv.indexOf("Q1,38.138,W") !== -1, outCsv.trim());
 
   console.log("== 13. Live Crossref DOI lookups (6 known DOIs) ==");
@@ -524,11 +524,12 @@ async function main() {
   check("background handles fetchMjlCategory and fetchSjrExport messages",
     bgJs.indexOf('message.type === "fetchMjlCategory"') !== -1
     && bgJs.indexOf('message.type === "fetchSjrExport"') !== -1);
-  check("manifest is 0.4.2 with MJL and SJR host permissions",
-    manifest.version === "0.4.2"
+  check("manifest is 0.4.3 with MJL, SJR and DOAJ host permissions",
+    manifest.version === "0.4.3"
     && manifest.host_permissions.indexOf("https://mjl.clarivate.com/*") !== -1
     && manifest.host_permissions.indexOf("https://www.scimagojr.com/*") !== -1
-    && manifest.host_permissions.indexOf("https://scimagojr.com/*") !== -1);
+    && manifest.host_permissions.indexOf("https://scimagojr.com/*") !== -1
+    && manifest.host_permissions.indexOf("https://doaj.org/*") !== -1);
   // File types: each upload button takes only its own types.
   check("shared fileExtension: .XLSX lowercased, no extension is empty",
     SHARED.fileExtension("Report.XLSX") === ".xlsx" && SHARED.fileExtension("data.csv") === ".csv"
@@ -905,8 +906,9 @@ async function main() {
   const csvParsed = DATA.parseCsv(DATA.resultsToCsv(csvResults));
   check("batch CSV: header + all 3 rows, SJR quartile in the SJR column, JCR quartile in the JCR column",
     csvParsed.length === 4
-    && csvParsed[0].indexOf("SJR quartile - fallback NOT JCR (year)") === 8
-    && csvParsed[1][5] === "Q2" && csvParsed[2][8] === "Q1" && csvParsed[3][0] === "C",
+    && csvParsed[0].indexOf("HEC category") === 8
+    && csvParsed[0].indexOf("SJR quartile - fallback NOT JCR (year)") === 9
+    && csvParsed[1][5] === "Q2" && csvParsed[2][9] === "Q1" && csvParsed[3][0] === "C",
     JSON.stringify(csvParsed));
 
   console.log("== 29. SJR auto-download: out=xls is the working export URL (27 Nov 2026) ==");
@@ -1050,8 +1052,9 @@ async function main() {
     && bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })') !== -1
     && bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })')
       < bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })'));
-  check("challenge poll is capped at 30s (15 x 2s), not 40s",
-    bgJs31.indexOf("for (let i = 0; i < 15; i++)") !== -1);
+  check("MJL tab poll runs up to ~45s (23 x 2s) with a stability gate on 'not indexed', not 30s",
+    bgJs31.indexOf("for (let i = 0; i < 23; i++)") !== -1
+    && bgJs31.indexOf("mjlNotIndexedIsStable") !== -1);
   check("in-tab CSV fetch has a total ~90s deadline (first candidate up to 60s, rest share the remainder)",
     bgJs31.indexOf("(budgetMs || 90000)") !== -1
     && bgJs31.indexOf("Math.min(60000, remaining)") !== -1);
@@ -1122,9 +1125,10 @@ async function main() {
   check("panel no longer saves MJL itself (only the manual file import keeps putMjl)",
     popupJs.indexOf("Master Journal List (automatic)\", rows: rows.length, importedAt: new Date().toISOString(), expires: DATA.mjlExpiresAt(new Date().toISOString()) });") === -1
     || (popupJs.match(/putMjl\(/g) || []).length === 1);
-  check("batch WoS summary counts how many were saved, not just found",
-    popupJs.indexOf("let checked = 0, found = 0, saved = 0;") !== -1
-    && popupJs.indexOf("WoS categories: ${wos.found} found of ${wos.checked} checked${wos.found ? `, ${wos.saved} saved.` : \".\"}`") !== -1);
+  check("batch WoS summary counts how many were saved, not just found, plus the HEC count",
+    popupJs.indexOf("let checked = 0, found = 0, saved = 0, hecFound = 0;") !== -1
+    && popupJs.indexOf("WoS categories: ${wos.found} found of ${wos.checked} checked${wos.found ? `, ${wos.saved} saved.` : \".\"}`") !== -1
+    && popupJs.indexOf("HEC Y: ${wos.hecFound} found (DOAJ).") !== -1);
   // Store behaviour (MemoryStore shares the IdbStore keying).
   const wosStore = new DATA.MemoryStore();
   const wosAt = new Date().toISOString();
@@ -1225,6 +1229,11 @@ async function main() {
     global.window = {};
     global.fetch = async (url) => ({ ok: true, status: 200, text: async () => fetchMap(String(url)) });
   }
+  // The mock above replaces the real fetch: save it first and
+  // restore it afterwards, so later sections (live DOAJ checks
+  // in section 36) still have a real fetch. Deleting it here
+  // used to leave `fetch` undefined for the rest of the suite.
+  const realFetch33 = global.fetch;
   if (sjrInTabFetch) {
     // Case A — clearance present, latest year: the fetch works,
     // and the return is a SMALL ack (no 11 MB text in it).
@@ -1257,7 +1266,7 @@ async function main() {
       JSON.stringify((rC.tried || []).map((t) => t.kind)));
     delete global.window;
     delete global.document;
-    delete global.fetch;
+    global.fetch = realFetch33;
   }
   // The worker guards the same year check at import time, and
   // the failure reason now travels to the panel instead of a
@@ -1337,8 +1346,8 @@ async function main() {
   check("manifest name and author are the owner's, no internal Phase label",
     manifest34.name === "Journal Quartile Extension" && manifest34.author === "Mobeen Nasir"
     && manifest34.name.indexOf("Phase") === -1 && String(manifest34.action.default_title).indexOf("Phase") === -1);
-  check("manifest is MV3, version 0.4.2, host permissions scoped",
-    manifest34.manifest_version === 3 && manifest34.version === "0.4.2"
+  check("manifest is MV3, version 0.4.3, host permissions scoped",
+    manifest34.manifest_version === 3 && manifest34.version === "0.4.3"
     && manifest34.host_permissions.indexOf("<all_urls>") === -1
     && manifest34.host_permissions.every((h) => h.indexOf("*://*/*") === -1));
   const pngSize = (file) => {
@@ -1351,8 +1360,8 @@ async function main() {
   check("side panel open trigger uses openPanelOnActionClick",
     fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8").indexOf("openPanelOnActionClick: true") !== -1);
   const readme34 = fs.readFileSync(path.join(DIR, "..", "README.md"), "utf8");
-  check("README states version 0.4.2 and has no em or en dashes",
-    readme34.indexOf("0.4.2") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
+  check("README states version 0.4.3 and has no em or en dashes",
+    readme34.indexOf("0.4.3") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
   // Security: no code execution from data, no secrets, no trackers.
   const allJs34 = ["popup.js", "background.js", "jcr.js", "shared.js", "net.js", "freedata.js"]
     .map((f) => fs.readFileSync(path.join(DIR, "..", f), "utf8")).join("\n");
@@ -1483,6 +1492,165 @@ async function main() {
   const panel35 = fs.readFileSync(path.join(DIR, "..", "sidepanel.html"), "utf8");
   check("panel still has the WoS button for a manual re-check",
     panel35.indexOf('id="batch-mjl"') !== -1 && panel35.indexOf("Get WoS categories (free)") !== -1);
+
+  console.log("== 36. HEC fallback: DOAJ Y, HJRS import, MJL stability fix for the 3 SCIE misses (27 Nov 2026) ==");
+  // User order 27 Nov 2026 18:35 PKT ("hec fallback"). Source
+  // choice, verified live the same day: HEC publishes the
+  // national list as a PDF (no importable international list),
+  // so the automatic route is the free DOAJ API — a listed
+  // journal is HEC Y. Verified live: FUUAST Journal of Biology
+  // (2616-8758) and NUST Journal of Natural Sciences
+  // (2710-222X) are in DOAJ; Biotechnology Journal International
+  // (2456-7051), Int. J. Biosciences (2220-6655/2222-5234),
+  // Asian J. Biochemistry (2582-3698), PJBB (2707-5494), BJSTR
+  // (2574-1241), Jordan J. Agric. Sci. (1815-8625) are not.
+  const FREE36 = require("../freedata.js");
+  check("doajJournalUrl builds the documented ISSN lookup URL",
+    FREE36.doajJournalUrl("26168758") === "https://doaj.org/api/search/journals/issn:2616-8758"
+    && FREE36.doajJournalUrl("2710-222X") === "https://doaj.org/api/search/journals/issn:2710-222X");
+  check("parseDoajResponse: total 1 lists the journal with its title",
+    (() => { const p = FREE36.parseDoajResponse({ total: 1, results: [{ bibjson: { title: "FUUAST Journal of Biology" } }] }); return p.listed && p.title === "FUUAST Journal of Biology"; })());
+  check("parseDoajResponse: total 0 is not listed",
+    (() => { const p = FREE36.parseDoajResponse({ total: 0, results: [] }); return !p.listed && p.title === ""; })());
+  check("parseDoajResponse: malformed JSON is not listed, never an error to invent from",
+    !FREE36.parseDoajResponse(null).listed && !FREE36.parseDoajResponse({}).listed && !FREE36.parseDoajResponse("nope").listed);
+  // Live DOAJ checks (real network, same pattern as the live
+  // Crossref tests above). These are the two HEC-Y journals
+  // from the user's CSV, plus one confirmed not-listed journal.
+  try {
+    const fuuast = await fetchJsonRetry(FREE36.doajJournalUrl("26168758"));
+    check("LIVE DOAJ: FUUAST Journal of Biology (2616-8758) is listed -> HEC Y",
+      FREE36.parseDoajResponse(fuuast).listed, JSON.stringify({ total: fuuast && fuuast.total }));
+  } catch (err) {
+    check("LIVE DOAJ: FUUAST Journal of Biology (2616-8758) is listed -> HEC Y", false, "network: " + err.message);
+  }
+  try {
+    const nust = await fetchJsonRetry(FREE36.doajJournalUrl("2710222X"));
+    check("LIVE DOAJ: NUST Journal of Natural Sciences (2710-222X) is listed -> HEC Y",
+      FREE36.parseDoajResponse(nust).listed, JSON.stringify({ total: nust && nust.total }));
+  } catch (err) {
+    check("LIVE DOAJ: NUST Journal of Natural Sciences (2710-222X) is listed -> HEC Y", false, "network: " + err.message);
+  }
+  try {
+    const bji = await fetchJsonRetry(FREE36.doajJournalUrl("24567051"));
+    check("LIVE DOAJ: Biotechnology Journal International (2456-7051) is NOT listed -> no HEC Y",
+      !FREE36.parseDoajResponse(bji).listed, JSON.stringify({ total: bji && bji.total }));
+  } catch (err) {
+    check("LIVE DOAJ: Biotechnology Journal International (2456-7051) is NOT listed -> no HEC Y", false, "network: " + err.message);
+  }
+  // HJRS import parsing (synthetic fixture).
+  const hjrsText = fs.readFileSync(path.join(DIR, "synthetic-hjrs.csv"), "utf8");
+  const hjrs = DATA.parseHecText(hjrsText, { fileName: "synthetic-hjrs.csv" });
+  check("HJRS import parses 11 ISSN rows, 1 skipped (row with no category)",
+    hjrs.rows.length === 11 && hjrs.skipped === 1, JSON.stringify({ rows: hjrs.rows.length, skipped: hjrs.skipped, warnings: hjrs.warnings }));
+  const fuuastRow = hjrs.rows.find((r) => r.issn === "26168758");
+  check("HJRS row: FUUAST is Y from 'Y category', source HJRS import",
+    fuuastRow && fuuastRow.hecCategory === "Y" && fuuastRow.hecSource === "HJRS import", JSON.stringify(fuuastRow));
+  check("HJRS import stores both ISSNs (print + online) for one journal",
+    hjrs.rows.some((r) => r.issn === "22220356" && r.hecCategory === "Y")
+    && hjrs.rows.some((r) => r.issn === "20724659" && r.hecCategory === "Y"));
+  check("HJRS import reads W and X spellings too",
+    hjrs.rows.some((r) => r.issn === "10161597" && r.hecCategory === "W")
+    && hjrs.rows.some((r) => r.issn === "26171279" && r.hecCategory === "X"));
+  // HEC store: put/get, expiry, dedupe.
+  const hecStore = new DATA.MemoryStore();
+  const hecImportedAt = new Date().toISOString();
+  await hecStore.putHec([
+    { issn: "26168758", journal: "FUUAST Journal of Biology", hecCategory: "Y", hecSource: "DOAJ", sourceFile: "DOAJ (automatic)", importedAt: hecImportedAt, expires: DATA.mjlExpiresAt(hecImportedAt) },
+    { issn: "22220356", journal: "FUUAST Journal of Biology", hecCategory: "Y", hecSource: "DOAJ", sourceFile: "DOAJ (automatic)", importedAt: hecImportedAt, expires: DATA.mjlExpiresAt(hecImportedAt) },
+  ], { fileName: "DOAJ (automatic)", rows: 2, importedAt: hecImportedAt, expires: DATA.mjlExpiresAt(hecImportedAt) });
+  const hecHit = await hecStore.getHec(["26168758"]);
+  check("HEC store: DOAJ Y row is answered by ISSN", hecHit && hecHit.category === "Y" && hecHit.source === "DOAJ", JSON.stringify(hecHit));
+  check("HEC store: answered by the second ISSN too",
+    (await hecStore.getHec(["22220356"])) !== null);
+  check("HEC store: unknown ISSN is null", (await hecStore.getHec(["24567051"])) === null);
+  const hecMeta = await hecStore.getMeta();
+  check("HEC store: meta counts 2 rows, 1 file entry", hecMeta.hecRows === 2 && hecMeta.hecFiles.length === 1, JSON.stringify({ rows: hecMeta.hecRows, files: hecMeta.hecFiles.length }));
+  const expiredStore = new DATA.MemoryStore();
+  await expiredStore.putHec([
+    { issn: "26168758", journal: "FUUAST Journal of Biology", hecCategory: "Y", hecSource: "DOAJ", importedAt: "2020-01-01T00:00:00.000Z", expires: "2021-01-01T00:00:00.000Z" },
+  ], null);
+  check("HEC store: expired automatic row does not answer", (await expiredStore.getHec(["26168758"])) === null);
+  // Lookup order: HEC only in the "none" branch, never an override.
+  const hecOnly = new DATA.MemoryStore();
+  hecOnly.hec.set("26168758", { issn: "26168758", journal: "FUUAST Journal of Biology", hecCategory: "Y", hecSource: "DOAJ" });
+  const hecRank = await hecOnly.getRank(["26168758"], 2019);
+  check("lookup: HEC-only journal returns source none + HEC Y (DOAJ), never a quartile",
+    hecRank && hecRank.source === "none" && hecRank.quartile === "" && hecRank.hecCategory === "Y" && hecRank.hecSource === "DOAJ", JSON.stringify(hecRank));
+  const wosPlusHec = new DATA.MemoryStore();
+  wosPlusHec.mjl = new Map();
+  wosPlusHec.mjl.set("1319562X", { issn: "1319562X", journal: "Saudi Journal of Biological Sciences", wosCategory: "W", wosIndex: "SCIE" });
+  wosPlusHec.hec.set("1319562X", { issn: "1319562X", journal: "Saudi Journal of Biological Sciences", hecCategory: "Y", hecSource: "DOAJ" });
+  const wosRank = await wosPlusHec.getRank(["1319562X"], 2019);
+  check("lookup: WoS W + HEC Y returns W and NO HEC value (HEC never overrides W/X)",
+    wosRank && wosRank.wosCategory === "W" && !wosRank.hecCategory, JSON.stringify(wosRank));
+  const sjrPlusHec = new DATA.MemoryStore();
+  sjrPlusHec.sjr.set("26168758|2019", { issn: "26168758", journal: "FUUAST Journal of Biology", year: 2019, quartile: "Q4", sjr: 0.12 });
+  sjrPlusHec.hec.set("26168758", { issn: "26168758", journal: "FUUAST Journal of Biology", hecCategory: "Y", hecSource: "DOAJ" });
+  const sjrHecRank = await sjrPlusHec.getRank(["26168758"], 2019);
+  check("lookup: SJR quartile + HEC Y returns SJR only, no HEC value",
+    sjrHecRank && sjrHecRank.source === "SJR" && sjrHecRank.quartile === "Q4" && !sjrHecRank.hecCategory, JSON.stringify(sjrHecRank));
+  // CSV: HEC column after WoS category, always labelled fallback.
+  const hecCsv = DATA.resultsToCsv([
+    { title: "T1", journal: "FUUAST Journal of Biology", year: "2019", issn: "2616-8758", doi: "10.0000/x", rank: { source: "none", quartile: "", jif: null, wosCategory: "", hecCategory: "Y", hecSource: "DOAJ" }, note: "Found by DOI. Not ranked (not in WoS or Scopus)" },
+    { title: "T2", journal: "Saudi Journal of Biological Sciences", year: "2019", issn: "1319-562X", doi: "10.0000/y", rank: { source: "SJR", quartile: "Q1", jif: null, wosCategory: "W" }, note: "Found by DOI" },
+  ]);
+  const hecHeader = hecCsv.split("\n")[0];
+  check("CSV header has an HEC category column right after WoS category",
+    hecHeader.indexOf("WoS category,HEC category,") !== -1, hecHeader);
+  check("CSV HEC cell is labelled fallback, NOT JCR/WoS, with its source",
+    hecCsv.indexOf("HEC Y (fallback, NOT JCR/WoS; DOAJ)") !== -1);
+  check("CSV row with a WoS category has a blank HEC cell (no double value)",
+    (() => { const lines = hecCsv.split("\n"); return lines[2] && lines[2].indexOf(",W,,") !== -1; })(), hecCsv.split("\n")[2] || "");
+  check("CSV 'not ranked' note is carried for a row with no ranking anywhere",
+    hecCsv.indexOf("Not ranked (not in WoS or Scopus)") !== -1);
+  // MJL stability fix (the 3 SCIE misses): a single early
+  // "Found 0 results" must NOT be accepted as not-indexed.
+  check("MJL stability: 1 reading at 2s is NOT stable", !FREE36.mjlNotIndexedIsStable(1, 2000));
+  check("MJL stability: 2 readings at 4s is NOT stable yet (needs 8s)", !FREE36.mjlNotIndexedIsStable(2, 4000));
+  check("MJL stability: 2 readings at 8s IS stable", FREE36.mjlNotIndexedIsStable(2, 8000));
+  check("MJL stability: 3 readings at 10s IS stable", FREE36.mjlNotIndexedIsStable(3, 10000));
+  const mjlFirstReading = FREE36.parseMjlSearchHtml("<p>Found 0 results</p><div>No search results found.</div>");
+  const mjlSecondReading = FREE36.parseMjlSearchHtml("<p>Found 1 results</p><div>Web of Science Core Collection: Science Citation Index Expanded</div>");
+  check("MJL sequence: first reading says not-indexed, second says SCIE/W — the first must not end the poll",
+    mjlFirstReading.found === "not-indexed" && mjlSecondReading.found === "result" && mjlSecondReading.index === "SCIE" && mjlSecondReading.category === "W");
+  const bgJs36 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
+  check("background: MJL tab poll waits for a STABLE not-indexed reading",
+    bgJs36.indexOf("mjlNotIndexedIsStable") !== -1
+    && bgJs36.indexOf("consecutiveNotIndexed") !== -1);
+  check("background: a not-indexed MJL answer is retried once in a fresh tab",
+    bgJs36.indexOf("retried once in a fresh tab") !== -1
+    && bgJs36.indexOf("if (result && result.notIndexed) {") !== -1);
+  check("background: only a successful MJL category is cached in memory (no poisoned negatives)",
+    bgJs36.indexOf("if (cacheKey && result && result.category) mjlCategoryCache.set(cacheKey, result);") !== -1);
+  check("background: DOAJ HEC check exists with store-first read and worker-side save",
+    bgJs36.indexOf("async function fetchHecCategory(issns, journal)") !== -1
+    && bgJs36.indexOf('message.type === "fetchHecCategory"') !== -1
+    && bgJs36.indexOf("await new FDATA.IdbStore().getHec(list)") !== -1
+    && bgJs36.indexOf("await saveHecCategory(result, list, journal);") !== -1);
+  // Wiring in the panel (source checks, same pattern as section 35).
+  const popupJs36 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  check("panel: batch WoS pass also runs the HEC fallback and counts it",
+    popupJs36.indexOf("const hec = await fetchHecCategory(r.issns, r.journal);") !== -1
+    && popupJs36.indexOf("hecFound++") !== -1
+    && popupJs36.indexOf("HEC Y: ${wos.hecFound} found (DOAJ).") !== -1);
+  check("panel: a found row with no ranking anywhere gets the 'not ranked' note",
+    popupJs36.indexOf('Not ranked (not in WoS or Scopus)') !== -1);
+  check("panel: single lookup chains the HEC check after the WoS check",
+    popupJs36.indexOf("updateWosCategory(data, rankForExport).then(() => updateHecCategory(data, rankForExport));") !== -1
+    && popupJs36.indexOf('["HEC category"') !== -1);
+  check("panel: HEC row is labelled fallback, NOT JCR/WoS",
+    popupJs36.indexOf("HEC \" + hec + \" — fallback, NOT JCR/WoS") !== -1);
+  check("panel: HJRS import handler exists (parseHecText -> putHec)",
+    popupJs36.indexOf("DATA.parseHecText(text, { fileName: file.name })") !== -1
+    && popupJs36.indexOf("await getStore().putHec(parsed.rows,") !== -1);
+  const panel36 = fs.readFileSync(path.join(DIR, "..", "sidepanel.html"), "utf8");
+  check("panel HTML: HEC import section exists (file, import button, status)",
+    panel36.indexOf('id="hec-file"') !== -1 && panel36.indexOf('id="hec-import"') !== -1
+    && panel36.indexOf('id="hec-status"') !== -1 && panel36.indexOf("Import HEC data") !== -1);
+  const manifest36 = JSON.parse(fs.readFileSync(path.join(DIR, "..", "manifest.json"), "utf8"));
+  check("manifest: doaj.org host permission added, version 0.4.3",
+    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.3");
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));

@@ -416,20 +416,39 @@ async function fetchMjlCategoryViaTab(issns) {
       const loaded = await waitForTabLoad(tabId, 30000);
       if (!loaded) { sawUnreadable = true; continue; }
       // The Angular app renders after load: poll the rendered
-      // text until a result (or "0 results") appears, up to ~30s.
+      // text until a result (or a STABLE "0 results") appears,
+      // up to ~45s. STABLE matters (27 Nov 2026): the results
+      // pane first renders "Found 0 results" BEFORE the search
+      // API returns, so a single early "0 results" reading is
+      // a false "not in WoS" — it is only accepted after two
+      // consecutive readings, at least 8s after load (see
+      // FREE.mjlNotIndexedIsStable). That race missed three
+      // SCIE journals in the user's batch (Saudi Journal of
+      // Biological Sciences, Microorganisms, Biology and
+      // Fertility of Soils).
       let parsed = { found: "unknown" };
-      for (let i = 0; i < 15; i++) {
+      const startedAt = Date.now();
+      let consecutiveNotIndexed = 0;
+      for (let i = 0; i < 23; i++) {
         await sleepMs(2000);
         let text = "";
         try { text = await readTabText(tabId); } catch (err) { break; }
         if (FREE.looksBlocked(text, 200)) { sawBlocked = true; break; }
         parsed = FREE.parseMjlSearchHtml(text);
-        if (parsed.found === "result" || parsed.found === "not-indexed") break;
+        if (parsed.found === "result") break;
+        if (parsed.found === "not-indexed") {
+          consecutiveNotIndexed++;
+          if (FREE.mjlNotIndexedIsStable(consecutiveNotIndexed, Date.now() - startedAt)) break;
+          continue;
+        }
+        consecutiveNotIndexed = 0;
       }
       if (parsed.found === "result" && parsed.category) {
         return { category: parsed.category, index: parsed.index, issn };
       }
-      if (parsed.found === "not-indexed") return { category: "", index: "", issn, notIndexed: true };
+      if (parsed.found === "not-indexed" && FREE.mjlNotIndexedIsStable(consecutiveNotIndexed, Date.now() - startedAt)) {
+        return { category: "", index: "", issn, notIndexed: true };
+      }
       sawUnreadable = true;
     } catch (err) {
       sawUnreadable = true;
@@ -491,6 +510,17 @@ async function fetchMjlCategory(issns, journal) {
     if (!result.error && !result.category && !result.notIndexed) {
       result = { error: sawUnreadable ? "unreadable" : "network" };
     }
+    // A "not indexed" answer is retried once in a fresh tab:
+    // a throttled background tab can still render the initial
+    // "Found 0 results" state even after the stability wait,
+    // and a false negative here would wrongly mark an indexed
+    // journal as not in WoS (the 3 SCIE misses, 27 Nov 2026).
+    if (result && result.notIndexed) {
+      try {
+        const retry = await fetchMjlCategoryViaTab(list);
+        if (retry && retry.category) result = retry;
+      } catch (err) { /* keep the first answer */ }
+    }
   }
   // Save every successful category result HERE, in the worker:
   // the single save point for every caller (single lookup,
@@ -508,7 +538,11 @@ async function fetchMjlCategory(issns, journal) {
       result.stored = true;
     } catch (err) { result.stored = false; }
   }
-  if (cacheKey) mjlCategoryCache.set(cacheKey, result);
+  // Only a successful category is cached in memory: a
+  // "not indexed" or error answer must never poison later
+  // lookups for the worker's lifetime — a retry (manual button
+  // or next batch) has to be able to find the journal.
+  if (cacheKey && result && result.category) mjlCategoryCache.set(cacheKey, result);
   return result;
 }
 
@@ -526,6 +560,82 @@ async function saveMjlCategory(result, issns, journal) {
   }));
   if (!rows.length) return;
   await new FDATA.IdbStore().putMjl(rows, { fileName: "Master Journal List (automatic)", rows: rows.length, importedAt, expires });
+}
+
+// ---------- HEC fallback (Y via DOAJ) ----------
+// HEC Policy 2024 v2.0: Y covers journals in Scopus, MEDLINE,
+// CNKI, DOAJ, or HEC-recommended lists (other than WoS, which
+// is W/X). The only one of those with a free public ISSN
+// lookup is DOAJ (verified live 27 Nov 2026 — see
+// FREE.doajJournalUrl / parseDoajResponse in freedata.js), so
+// the automatic HEC check is DOAJ-only: a listed journal is
+// HEC Y. CNKI and MEDLINE have no free lookup the extension
+// can call, so they are NOT checked — a journal in CNKI but
+// not DOAJ stays "not ranked" rather than getting an invented
+// Y. HJRS list files can be imported by hand (parseHecText).
+// A HEC value is stored like a WoS row (ISSN key, import date
+// + 12-month expiry) and is only ever shown as "HEC Y —
+// fallback, NOT JCR/WoS", never as a quartile or a W/X.
+const hecCategoryCache = new Map();
+
+async function fetchHecCategory(issns, journal) {
+  const list = (issns || []).filter(Boolean);
+  const cacheKey = list.join(",");
+  if (cacheKey && hecCategoryCache.has(cacheKey)) return hecCategoryCache.get(cacheKey);
+  // 0. Store first: a journal checked before is answered from
+  // IndexedDB with no network call.
+  try {
+    const stored = await new FDATA.IdbStore().getHec(list);
+    if (stored) {
+      const hit = { category: stored.category, source: stored.source, issn: stored.issn, stored: true };
+      if (cacheKey) hecCategoryCache.set(cacheKey, hit);
+      return hit;
+    }
+  } catch (err) { /* fall through to the live check */ }
+  let result = null;
+  for (const issn of list) {
+    let res;
+    try {
+      res = await fetchTextTimeout(FREE.doajJournalUrl(issn), 15000, "application/json, */*");
+    } catch (err) {
+      continue;
+    }
+    if (!res.ok) continue;
+    let json = null;
+    try { json = JSON.parse(res.text); } catch (err) { continue; }
+    const parsed = FREE.parseDoajResponse(json);
+    if (parsed.listed) {
+      result = { category: "Y", source: "DOAJ", issn, title: parsed.title };
+      break;
+    }
+    // total 0 for this ISSN: try the next ISSN of the journal
+    // (print vs online) before concluding "not in DOAJ".
+  }
+  if (!result) result = { notListed: true };
+  if (result && result.category) {
+    try {
+      await saveHecCategory(result, list, journal);
+      result.stored = true;
+    } catch (err) { result.stored = false; }
+    if (cacheKey) hecCategoryCache.set(cacheKey, result);
+  }
+  return result;
+}
+
+// One auto-saved HEC entry per journal: rows under every ISSN
+// of that journal (print + online), so a later lookup by
+// either ISSN hits the store.
+async function saveHecCategory(result, issns, journal) {
+  const importedAt = new Date().toISOString();
+  const expires = FDATA.mjlExpiresAt(importedAt); // 12 months, like the WoS list
+  const rows = (issns || []).filter(Boolean).map((issn) => ({
+    issn, journal: journal || "",
+    hecCategory: result.category, hecSource: result.source || "DOAJ",
+    sourceFile: "DOAJ (automatic)",
+    importedAt, expires,
+  }));
+  if (!rows.length) return;
+  await new FDATA.IdbStore().putHec(rows, { fileName: "DOAJ (automatic)", rows: rows.length, importedAt, expires });
 }
 
 // Fetch the SJR CSV FROM INSIDE a tab on scimagojr.com.
@@ -1038,6 +1148,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // then one-click download+import, then manual import.
   if (message && message.type === "fetchMjlCategory") {
     fetchMjlCategory(message.issns || (message.issn ? [message.issn] : []), message.journal || "")
+      .then((r) => sendResponse(r))
+      .catch((err) => sendResponse({ error: "network", detail: String(err && err.message || err) }));
+    return true;
+  }
+  if (message && message.type === "fetchHecCategory") {
+    fetchHecCategory(message.issns || (message.issn ? [message.issn] : []), message.journal || "")
       .then((r) => sendResponse(r))
       .catch((err) => sendResponse({ error: "network", detail: String(err && err.message || err) }));
     return true;

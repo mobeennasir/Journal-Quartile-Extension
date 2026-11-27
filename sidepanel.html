@@ -163,10 +163,22 @@
       </div>
       <p id="mjl-status" class="status" aria-live="polite">No WoS list imported yet.</p>
 
+      <h3>Import HEC data</h3>
+      <p class="section-desc">Fallback only. HEC Y is checked automatically via DOAJ. Import an HEC recognised-journals list (Title, ISSN, Category) for journals DOAJ does not cover. Never shown as a quartile or a WoS category.</p>
+      <div class="batch-controls">
+        <label class="file-label" for="hec-file">Choose HEC file</label>
+        <input id="hec-file" type="file" accept=".csv,.xlsx,.xls" hidden>
+        <span id="hec-file-name" class="file-name">No file chosen.</span>
+      </div>
+      <div class="button-row">
+        <button id="hec-import" type="button" class="primary" disabled>Import HEC file</button>
+      </div>
+      <p id="hec-status" class="status" aria-live="polite">No HEC data imported yet. HEC Y is checked automatically via DOAJ.</p>
+
       <button id="clear-data" type="button" class="ghost danger">Clear all imported data</button>
     </section>
 
-    <footer class="foot">Sources: Crossref, OpenAlex fallback. WoS category and SJR quartile are free. JCR quartile and Impact Factor need an imported JCR file.</footer>
+    <footer class="foot">Sources: Crossref, OpenAlex fallback. WoS category and SJR quartile are free. JCR quartile and Impact Factor need an imported JCR file. HEC Y is a fallback from DOAJ or an imported HEC list, never a quartile.</footer>
     <p class="credit">Built by Mobeen Nasir</p>
     <p id="storage-note" class="hint" hidden></p>
     <button id="open-tab" type="button" class="ghost">Open in a full tab</button>

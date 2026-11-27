@@ -403,6 +403,77 @@
     return out;
   }
 
+  // ---------- HEC parsing (HJRS list import, manual) ----------
+  // HEC Recognized National Research Journals list (HEC
+  // publishes it as a PDF table; the user exports it to
+  // CSV/Excel themselves): Title of the Journal, ISSN P,
+  // ISSN E, Publisher, Subject, Category ("W category",
+  // "X category", "Y category" or bare W/X/Y). One stored row
+  // per ISSN, keyed by ISSN alone (no year — the category is
+  // current, like the WoS list). A row: { issn, journal,
+  // hecCategory, hecSource: "HJRS import", sourceFile }.
+  // The HEC category is a FALLBACK only: it is never a
+  // quartile and never a WoS category, and it is only shown
+  // when the journal has no WoS category and no SJR quartile.
+  function parseHecCategoryCell(value) {
+    if (!value) return "";
+    const v = String(value).trim().toUpperCase();
+    if (v === "W" || v.indexOf("W CATEGORY") === 0 || v === "W-CATEGORY") return "W";
+    if (v === "X" || v.indexOf("X CATEGORY") === 0 || v === "X-CATEGORY") return "X";
+    if (v === "Y" || v.indexOf("Y CATEGORY") === 0 || v === "Y-CATEGORY") return "Y";
+    return "";
+  }
+
+  function parseHecText(text, opts) {
+    opts = opts || {};
+    const sourceFile = opts.fileName || "";
+    const table = parseCsv(text);
+    const out = { kind: "hec", rows: [], skipped: 0, warnings: [] };
+    if (!table.length) { out.warnings.push("File is empty."); return out; }
+    let headerIdx = -1;
+    for (let i = 0; i < Math.min(table.length, 10); i++) {
+      const norm = table[i].map(normaliseHeader);
+      if (norm.indexOf("category") !== -1 ||
+          norm.some((h) => h.indexOf("category") !== -1) ||
+          norm.indexOf("issn") !== -1) { headerIdx = i; break; }
+    }
+    if (headerIdx === -1) {
+      out.warnings.push("No header row found (looked for a category / ISSN column).");
+      out.skipped = table.length;
+      return out;
+    }
+    const headers = table[headerIdx];
+    const colIssn = findColumn(headers, ["issnp", "issn", "eissn"]);
+    const colEissn = findColumn(headers, ["issne", "eissn"]);
+    const colJournal = findJournalColumn(headers);
+    const colCategory = findColumn(headers, ["category", "heccategory"]);
+    if (colCategory === -1) {
+      out.warnings.push("No category column found — this does not look like an HEC recognised-journals list.");
+      out.skipped = table.length - headerIdx - 1;
+      return out;
+    }
+    for (let r = headerIdx + 1; r < table.length; r++) {
+      const row = table[r];
+      if (!row || row.every((c) => String(c).trim() === "")) continue;
+      const cell = (i) => (i >= 0 && i < row.length ? String(row[i]).trim() : "");
+      const issns = [];
+      [colIssn, colEissn].forEach((c) => {
+        parseIssnList(cell(c)).forEach((x) => { if (issns.indexOf(x) === -1) issns.push(x); });
+      });
+      const hecCategory = parseHecCategoryCell(cell(colCategory));
+      if (!issns.length && !cell(colJournal)) { out.skipped++; continue; }
+      if (!hecCategory) { out.skipped++; continue; }
+      (issns.length ? issns : [""]).forEach((issn) => {
+        out.rows.push({
+          issn: issn, journal: cell(colJournal),
+          hecCategory: hecCategory, hecSource: "HJRS import",
+          sourceFile: sourceFile,
+        });
+      });
+    }
+    return out;
+  }
+
   // ---------- SJR parsing ----------
   // SJR CSV (scimagojr.com download, human download in a browser —
   // automated fetch is Cloudflare-blocked, verified 27 Nov 2026):
@@ -543,7 +614,8 @@
   function MemoryStore() {
     this.jcr = new Map();   // key issn|year -> row
     this.sjr = new Map();
-    this.meta = { jcrFiles: [], sjrFiles: [], mjlFiles: [], importedAt: null };
+    this.hec = new Map();   // key ISSN alone -> HEC row (no year)
+    this.meta = { jcrFiles: [], sjrFiles: [], mjlFiles: [], hecFiles: [], importedAt: null };
   }
   MemoryStore.prototype.putJcr = function (rows, fileMeta) {
     rows.forEach((row) => { this.jcr.set(jcrKey(row.issn, row.year), row); });
@@ -574,6 +646,36 @@
     this.meta.importedAt = new Date().toISOString();
     return Promise.resolve(rows.length);
   };
+  MemoryStore.prototype.putHec = function (rows, fileMeta) {
+    // HEC rows have no year: they live in a separate map keyed
+    // by ISSN alone, like the MJL rows. One meta entry per file
+    // name, like the MJL store.
+    rows.forEach((row) => { if (row.issn) this.hec.set(row.issn, row); });
+    if (fileMeta) {
+      const list = this.meta.hecFiles;
+      const last = list[list.length - 1];
+      if (last && last.fileName === fileMeta.fileName) list[list.length - 1] = fileMeta;
+      else list.push(fileMeta);
+    }
+    this.meta.importedAt = new Date().toISOString();
+    return Promise.resolve(rows.length);
+  };
+  // One stored HEC category by ISSN, or null. Same expiry rule
+  // as the MJL store: rows stamped with an expiry (automatic
+  // DOAJ checks) are honoured; rows without one (manual HJRS
+  // imports) are always valid.
+  MemoryStore.prototype.getHec = function (issns) {
+    const list = (issns || []).filter(Boolean);
+    for (const issn of list) {
+      const row = this.hec ? this.hec.get(issn) : null;
+      if (row && row.hecCategory) {
+        if (!row.expires || new Date(row.expires).getTime() > Date.now()) {
+          return Promise.resolve({ category: row.hecCategory, source: row.hecSource || "HJRS import", issn });
+        }
+      }
+    }
+    return Promise.resolve(null);
+  };
   // One stored WoS category by ISSN, or null. Rows stamped with
   // an expiry (automatic per-article saves) are honoured; rows
   // without one (manual file imports) are always valid. This is
@@ -599,15 +701,18 @@
       jcrFiles: this.meta.jcrFiles.slice(),
       sjrFiles: this.meta.sjrFiles.slice(),
       mjlFiles: this.meta.mjlFiles.slice(),
+      hecFiles: this.meta.hecFiles.slice(),
       importedAt: this.meta.importedAt,
       jcrRows: this.jcr.size, sjrRows: this.sjr.size,
       mjlRows: this.mjl ? this.mjl.size : 0,
+      hecRows: this.hec ? this.hec.size : 0,
     });
   };
   MemoryStore.prototype.clear = function () {
     this.jcr.clear(); this.sjr.clear();
     if (this.mjl) this.mjl.clear();
-    this.meta = { jcrFiles: [], sjrFiles: [], mjlFiles: [], importedAt: null };
+    if (this.hec) this.hec.clear();
+    this.meta = { jcrFiles: [], sjrFiles: [], mjlFiles: [], hecFiles: [], importedAt: null };
     return Promise.resolve();
   };
 
@@ -661,26 +766,45 @@
         if (row && row.wosCategory && (!row.expires || new Date(row.expires).getTime() > Date.now())) { wosCategory = row.wosCategory; break; }
       }
     }
+    // 5. HEC fallback, last: only when there is NO WoS category
+    //    and NO quartile at all. A DOAJ listing (or an imported
+    //    HJRS row) gives HEC Y. It is returned separately and
+    //    labelled "HEC Y — fallback, NOT JCR/WoS" — it is never
+    //    a quartile and never a WoS category, and it never
+    //    overrides a W/X above.
+    let hecCategory = "", hecSource = "";
+    if (!wosCategory && store.hec) {
+      for (const issn of list) {
+        const row = store.hec.get(issn);
+        if (row && row.hecCategory && (!row.expires || new Date(row.expires).getTime() > Date.now())) {
+          hecCategory = row.hecCategory; hecSource = row.hecSource || "HJRS import"; break;
+        }
+      }
+    }
     return { source: "none", quartile: "", jif: null, wosCategory: wosCategory,
              wosIndex: "", category: "", journal: "", year: year,
+             hecCategory: hecCategory, hecSource: hecSource,
              editionYear: null, sourceFile: "" };
   }
 
   // IndexedDB store (browser only). Same interface as MemoryStore.
-  // DB: journal-quartile-db v1; stores jcr, sjr (keyPath "key"),
-  // mjl (keyPath "issn"), meta (keyPath "id", one row id "meta").
+  // DB: journal-quartile-db v2; stores jcr, sjr (keyPath "key"),
+  // mjl, hec (keyPath "issn"), meta (keyPath "id", one row id "meta").
+  // v2 adds the hec store (27 Nov 2026, HEC fallback); existing
+  // v1 databases upgrade in place, keeping their jcr/sjr/mjl rows.
   function IdbStore() { this._db = null; }
   IdbStore.prototype._open = function () {
     const self = this;
     if (self._db) return Promise.resolve(self._db);
     return new Promise((resolve, reject) => {
       if (typeof indexedDB === "undefined") { reject(new Error("IndexedDB is not available in this context.")); return; }
-      const req = indexedDB.open("journal-quartile-db", 1);
+      const req = indexedDB.open("journal-quartile-db", 2);
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains("jcr")) db.createObjectStore("jcr", { keyPath: "key" });
         if (!db.objectStoreNames.contains("sjr")) db.createObjectStore("sjr", { keyPath: "key" });
         if (!db.objectStoreNames.contains("mjl")) db.createObjectStore("mjl", { keyPath: "issn" });
+        if (!db.objectStoreNames.contains("hec")) db.createObjectStore("hec", { keyPath: "issn" });
         if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "id" });
       };
       req.onsuccess = () => { self._db = req.result; resolve(self._db); };
@@ -720,13 +844,42 @@
       return rows.length;
     }).then((n) => self._saveMeta("mjl", fileMeta).then(() => n));
   };
+  IdbStore.prototype.putHec = function (rows, fileMeta) {
+    const self = this;
+    return self._tx(["hec"], "readwrite", (tx) => {
+      const os = tx.objectStore("hec");
+      rows.forEach((row) => { if (row.issn) os.put(row); });
+      return rows.length;
+    }).then((n) => self._saveMeta("hec", fileMeta).then(() => n));
+  };
+  IdbStore.prototype.getHec = function (issns) {
+    const self = this;
+    const list = (issns || []).filter(Boolean);
+    if (!list.length) return Promise.resolve(null);
+    return self._open().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(["hec"], "readonly");
+      let pending = list.length, done = false;
+      list.forEach((issn) => {
+        const req = tx.objectStore("hec").get(issn);
+        req.onsuccess = () => {
+          const row = req.result;
+          if (!done && row && row.hecCategory && (!row.expires || new Date(row.expires).getTime() > Date.now())) {
+            done = true;
+            resolve({ category: row.hecCategory, source: row.hecSource || "HJRS import", issn });
+          } else if (--pending === 0 && !done) resolve(null);
+        };
+        req.onerror = () => { if (--pending === 0 && !done) resolve(null); };
+      });
+      tx.onerror = () => reject(tx.error || new Error("IndexedDB read failed."));
+    }));
+  };
   IdbStore.prototype._saveMeta = function (kind, fileMeta) {
     if (!fileMeta) return Promise.resolve();
     return this._tx(["meta"], "readwrite", (tx) => {
       const os = tx.objectStore("meta");
       const get = os.get("meta");
       get.onsuccess = () => {
-        const meta = get.result || { id: "meta", jcrFiles: [], sjrFiles: [], mjlFiles: [], importedAt: null };
+        const meta = get.result || { id: "meta", jcrFiles: [], sjrFiles: [], mjlFiles: [], hecFiles: [], importedAt: null };
         const key = kind + "Files";
         // One meta entry per file name: repeated auto-saves of the
         // same list replace the entry instead of appending one
@@ -775,8 +928,8 @@
     const list = (issns || []).filter(Boolean);
     if (!list.length || !year) return Promise.resolve(null);
     return self._open().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(["jcr", "sjr", "mjl"], "readonly");
-      const out = { jcr: null, sjr: null, mjl: null };
+      const tx = db.transaction(["jcr", "sjr", "mjl", "hec"], "readonly");
+      const out = { jcr: null, sjr: null, mjl: null, hec: null };
       let pending = 0;
       const check = () => {
         if (pending > 0) return;
@@ -796,7 +949,10 @@
         } else {
           resolve({ source: "none", quartile: "", jif: null,
             wosCategory: out.mjl || "", wosIndex: "", category: "",
-            journal: "", year: year, editionYear: null, sourceFile: "" });
+            journal: "", year: year,
+            hecCategory: (out.hec && !out.mjl) ? (out.hec.hecCategory || "") : "",
+            hecSource: (out.hec && !out.mjl) ? (out.hec.hecSource || "") : "",
+            editionYear: null, sourceFile: "" });
         }
       };
       // JCR first, in ISSN order.
@@ -815,11 +971,22 @@
         req.onerror = () => { pending--; trySjr(i + 1); };
       };
       const tryMjl = (i) => {
-        if (out.mjl || i >= list.length) { check(); return; }
+        if (out.mjl || i >= list.length) { tryHec(0); return; }
         pending++;
         const req = tx.objectStore("mjl").get(list[i]);
         req.onsuccess = () => { pending--; if (req.result && req.result.wosCategory && (!req.result.expires || new Date(req.result.expires).getTime() > Date.now())) out.mjl = req.result.wosCategory; tryMjl(i + 1); };
         req.onerror = () => { pending--; tryMjl(i + 1); };
+      };
+      // HEC fallback, last and only when there is no WoS
+      // category: a stored HEC row (DOAJ check or HJRS import)
+      // gives HEC Y. It never overrides W/X and never becomes
+      // a quartile.
+      const tryHec = (i) => {
+        if (out.hec || i >= list.length) { check(); return; }
+        pending++;
+        const req = tx.objectStore("hec").get(list[i]);
+        req.onsuccess = () => { pending--; if (req.result && req.result.hecCategory && (!req.result.expires || new Date(req.result.expires).getTime() > Date.now())) out.hec = req.result; tryHec(i + 1); };
+        req.onerror = () => { pending--; tryHec(i + 1); };
       };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB read failed."));
       tryJcr(0);
@@ -827,18 +994,19 @@
   };
   IdbStore.prototype.getMeta = function () {
     return this._open().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(["meta", "jcr", "sjr", "mjl"], "readonly");
-      const meta = { jcrFiles: [], sjrFiles: [], mjlFiles: [], importedAt: null, jcrRows: 0, sjrRows: 0, mjlRows: 0 };
+      const tx = db.transaction(["meta", "jcr", "sjr", "mjl", "hec"], "readonly");
+      const meta = { jcrFiles: [], sjrFiles: [], mjlFiles: [], hecFiles: [], importedAt: null, jcrRows: 0, sjrRows: 0, mjlRows: 0, hecRows: 0 };
       const getMeta = tx.objectStore("meta").get("meta");
       getMeta.onsuccess = () => {
         if (getMeta.result) {
           meta.jcrFiles = getMeta.result.jcrFiles || [];
           meta.sjrFiles = getMeta.result.sjrFiles || [];
           meta.mjlFiles = getMeta.result.mjlFiles || [];
+          meta.hecFiles = getMeta.result.hecFiles || [];
           meta.importedAt = getMeta.result.importedAt || null;
         }
       };
-      ["jcr", "sjr", "mjl"].forEach((name) => {
+      ["jcr", "sjr", "mjl", "hec"].forEach((name) => {
         const count = tx.objectStore(name).count();
         count.onsuccess = () => { meta[name + "Rows"] = count.result; };
       });
@@ -849,8 +1017,8 @@
   IdbStore.prototype.clear = function () {
     const self = this;
     return self._open().then((db) => new Promise((resolve, reject) => {
-      const tx = db.transaction(["jcr", "sjr", "mjl", "meta"], "readwrite");
-      ["jcr", "sjr", "mjl", "meta"].forEach((n) => tx.objectStore(n).clear());
+      const tx = db.transaction(["jcr", "sjr", "mjl", "hec", "meta"], "readwrite");
+      ["jcr", "sjr", "mjl", "hec", "meta"].forEach((n) => tx.objectStore(n).clear());
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error("IndexedDB clear failed."));
     }));
@@ -860,18 +1028,25 @@
 
   var RESULTS_HEADER = ["Title", "Journal", "Year", "ISSN", "DOI",
     "JCR quartile (year)", "Impact Factor - JCR (year)", "WoS category",
+    "HEC category",
     "SJR quartile - fallback NOT JCR (year)", "Source", "Status / note"];
 
   function resultRowToCsv(result) {
     const rank = result.rank || {};
     const isJcr = rank.source === "JCR";
     const isSjr = rank.source === "SJR";
+    // HEC cell: the HEC category, always labelled as a fallback
+    // that is NOT JCR and NOT WoS — never a quartile, never W/X.
+    const hec = rank.hecCategory
+      ? "HEC " + rank.hecCategory + " (fallback, NOT JCR/WoS; " + (rank.hecSource || "DOAJ") + ")"
+      : "";
     return [
       result.title || "", result.journal || "", result.year || "",
       result.issn || "", result.doi || "",
       isJcr ? (rank.quartile || "") : "",
       isJcr ? (rank.jif === null || rank.jif === undefined ? "" : String(rank.jif)) : "",
       rank.wosCategory || "",
+      hec,
       isSjr ? (rank.quartile || "") : "",
       rank.source || "none",
       result.note || "",
@@ -1089,7 +1264,7 @@
     parseCsv: parseCsv, rowsToCsv: rowsToCsv,
     parseQuartile: parseQuartile, parseJif: parseJif, parseYear: parseYear, parseSjrScore: parseSjrScore,
     wosCategoryFromIndex: wosCategoryFromIndex,
-    parseJcrText: parseJcrText, parseMJLText: parseMJLText,
+    parseJcrText: parseJcrText, parseMJLText: parseMJLText, parseHecText: parseHecText,
     parseSjrText: parseSjrText, parseArticleListText: parseArticleListText,
     MemoryStore: MemoryStore, IdbStore: IdbStore,
     lookupRankSync: lookupRankSync,

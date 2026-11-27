@@ -55,6 +55,10 @@ const mjlFileEl = document.getElementById("mjl-file");
 const mjlFileNameEl = document.getElementById("mjl-file-name");
 const mjlImportBtn = document.getElementById("mjl-import");
 const mjlStatusEl = document.getElementById("mjl-status");
+const hecFileEl = document.getElementById("hec-file");
+const hecFileNameEl = document.getElementById("hec-file-name");
+const hecImportBtn = document.getElementById("hec-import");
+const hecStatusEl = document.getElementById("hec-status");
 const clearDataBtn = document.getElementById("clear-data");
 const storageNoteEl = document.getElementById("storage-note");
 const autoFetchToggleEl = document.getElementById("auto-fetch");
@@ -360,6 +364,16 @@ function rankingRows(data, rank, sjrNote, sjrDetail) {
       : "No SJR data for this year"]);
   }
   rows.push(["WoS category", wosText || "Unknown — checking free WoS list…"]);
+  // HEC fallback row: it only applies when there is NO WoS
+  // category and NO quartile at all — a journal with a W/X or
+  // a quartile never gets an HEC value. It is NEVER a quartile
+  // and NEVER a WoS category — the label says so in plain words.
+  const hecApplies = (!wos) && (!rank || rank.source === "none");
+  const hec = rank && rank.hecCategory ? rank.hecCategory : "";
+  const hecText = hec
+    ? escapeHtml("HEC " + hec + " — fallback, NOT JCR/WoS (" + (rank.hecSource || "DOAJ") + ")")
+    : "";
+  rows.push(["HEC category", !hecApplies ? "—" : (hecText || "Checking HEC fallback…")]);
   if (rank && rank.source !== "none" && rank.sourceFile) {
     rows.push(["Ranking data from", escapeHtml(rank.sourceFile)]);
   }
@@ -430,8 +444,10 @@ async function showResult(data, sourceName, opts) {
   }
   // WoS category is free and needs no JCR: check it automatically
   // from the public Master Journal List (background worker). The
-  // result row updates live when the answer comes back.
-  updateWosCategory(data, rankForExport);
+  // result row updates live when the answer comes back. Once the
+  // WoS answer is in, the HEC fallback runs (only when there is
+  // still no WoS category and no quartile).
+  updateWosCategory(data, rankForExport).then(() => updateHecCategory(data, rankForExport));
   return rankForExport;
 }
 
@@ -447,6 +463,46 @@ function wosDdEl() {
     if (dt.textContent === "WoS category") return dt.nextElementSibling;
   }
   return null;
+}
+
+function hecDdEl() {
+  if (!resultEl) return null;
+  const dts = resultEl.querySelectorAll("dt");
+  for (const dt of dts) {
+    if (dt.textContent === "HEC category") return dt.nextElementSibling;
+  }
+  return null;
+}
+
+async function fetchHecCategory(issns, journal) {
+  // 30s: the DOAJ API is a plain JSON fetch, no tab needed.
+  return sendBackgroundMessage({ type: "fetchHecCategory", issns: issns || [], journal: journal || "" }, 30000);
+}
+
+// HEC fallback for a single lookup: only when the journal has
+// NO WoS category and NO quartile at all. A DOAJ listing gives
+// HEC Y; anything else stays "No HEC category". The result row
+// updates live when the answer comes back, like the WoS row.
+async function updateHecCategory(data, rank) {
+  if (!data || !data.issns || !data.issns.length) return;
+  if (rank && (rank.wosCategory || rank.source !== "none")) return; // HEC never overrides W/X or a quartile
+  const dd = hecDdEl();
+  if (dd) dd.textContent = "Checking HEC fallback…";
+  const res = await fetchHecCategory(data.issns, data.journal);
+  const ddNow = hecDdEl();
+  if (res && res.category) {
+    // Saved by the worker as it fetched (the single save
+    // point), so the next lookup for this journal reads it from
+    // the store with no network call.
+    if (ddNow) ddNow.textContent = "HEC " + res.category + " — fallback, NOT JCR/WoS (" + (res.source || "DOAJ") + ")";
+    if (lastShown && lastShown.data === data) {
+      lastShown.rank.hecCategory = res.category;
+      lastShown.rank.hecSource = res.source || "DOAJ";
+    }
+    refreshImportStatus();
+    return;
+  }
+  if (ddNow) ddNow.textContent = "No HEC category (not in DOAJ)";
 }
 
 function sendBackgroundMessage(message, timeoutMs) {
@@ -871,6 +927,7 @@ const ARTICLE_FILE_TYPES = [".csv", ".xlsx", ".xls"]; // article list
 const JCR_FILE_TYPES = [".csv", ".xlsx", ".xls"];     // JCR import
 const SJR_FILE_TYPES = [".csv"];                      // SJR import
 const MJL_FILE_TYPES = [".csv", ".xlsx", ".xls"];     // WoS list import
+const HEC_FILE_TYPES = [".csv", ".xlsx", ".xls"];     // HEC recognised-journals list import
 
 // "" when the file type is fine, else a short plain error.
 function wrongTypeMessage(file, allowed, what) {
@@ -948,6 +1005,14 @@ function refreshImportStatus() {
     } else {
       mjlStatusEl.textContent = "No WoS list imported yet.";
     }
+    const hecFile = latestFile(meta.hecFiles || []);
+    if (meta.hecRows && hecFile && hecFile.importedAt) {
+      hecStatusEl.textContent = `HEC data: ${meta.hecRows} journals stored. ${DATA.validUntilText(hecFile.importedAt, "mjl")}. Fallback only, never shown as JCR or WoS.`;
+    } else if (meta.hecRows) {
+      hecStatusEl.textContent = `HEC data: ${meta.hecRows} journals stored. Fallback only, never shown as JCR or WoS.`;
+    } else {
+      hecStatusEl.textContent = "No HEC data imported yet. HEC Y is checked automatically via DOAJ.";
+    }
     renderFreeDataStatus(meta);
   }).catch(() => { /* status stays as the default text */ });
 }
@@ -1023,6 +1088,19 @@ mjlFileEl.addEventListener("change", () => {
   }
   mjlStatusEl.classList.remove("error");
   mjlImportBtn.disabled = !mjlFileEl.files.length;
+});
+
+hecFileEl.addEventListener("change", () => {
+  hecFileNameEl.textContent = fileNameOf(hecFileEl) || "No file chosen.";
+  const bad = Array.from(hecFileEl.files || []).find((f) => wrongTypeMessage(f, HEC_FILE_TYPES, "the HEC import"));
+  if (bad) {
+    hecStatusEl.textContent = wrongTypeMessage(bad, HEC_FILE_TYPES, "the HEC import");
+    hecStatusEl.classList.add("error");
+    hecImportBtn.disabled = true;
+    return;
+  }
+  hecStatusEl.classList.remove("error");
+  hecImportBtn.disabled = !hecFileEl.files.length;
 });
 
 jcrImportBtn.addEventListener("click", async () => {
@@ -1134,6 +1212,38 @@ mjlImportBtn.addEventListener("click", async () => {
     mjlStatusEl.classList.add("error");
   } finally {
     mjlImportBtn.disabled = false;
+    refreshImportStatus();
+  }
+});
+
+hecImportBtn.addEventListener("click", async () => {
+  const files = Array.from(hecFileEl.files || []);
+  if (!files.length) return;
+  hecImportBtn.disabled = true;
+  hecStatusEl.textContent = "Importing HEC recognised-journals list…";
+  try {
+    let total = 0, skipped = 0;
+    const warnings = [];
+    for (const file of files) {
+      const text = await readSpreadsheetFile(file);
+      const parsed = DATA.parseHecText(text, { fileName: file.name });
+      if (parsed.rows.length) {
+        const importedAt = new Date().toISOString();
+        await getStore().putHec(parsed.rows, { fileName: file.name, rows: parsed.rows.length, importedAt, expires: DATA.mjlExpiresAt(importedAt) });
+        total += parsed.rows.length;
+      }
+      skipped += parsed.skipped;
+      parsed.warnings.forEach((w) => warnings.push(`${file.name}: ${w}`));
+    }
+    hecStatusEl.textContent = total
+      ? `Imported ${total} HEC journals. Shown only as "HEC W/X/Y — fallback, NOT JCR/WoS", never as a quartile. ${warnings.join(" ")}`
+      : `Nothing imported. ${warnings.join(" ")} Check the file is an HEC recognised-journals list with Title, ISSN and Category (W/X/Y) columns.`;
+    if (!total) hecStatusEl.classList.add("error"); else hecStatusEl.classList.remove("error");
+  } catch (err) {
+    hecStatusEl.textContent = `Import failed: ${err.message}`;
+    hecStatusEl.classList.add("error");
+  } finally {
+    hecImportBtn.disabled = false;
     refreshImportStatus();
   }
 });
@@ -1674,14 +1784,16 @@ batchDownloadBtn.addEventListener("click", () => {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
-// WoS pass over the batch rows (shared by the automatic run
-// at the end of a batch and the manual button): check the
+// WoS + HEC pass over the batch rows (shared by the automatic
+// run at the end of a batch and the manual button): check the
 // category for every row that has an ISSN and no category yet,
-// from the free public MJL search. Answers are stored until
-// expiry, so the next batch for the same journals is instant.
-// Returns { checked, found, saved }.
+// from the free public MJL search, then the HEC fallback (DOAJ
+// check) for rows still without a category or quartile. Answers
+// are stored until expiry, so the next batch for the same
+// journals is instant.
+// Returns { checked, found, saved, hecFound }.
 async function fetchBatchWoSCategories() {
-  let checked = 0, found = 0, saved = 0;
+  let checked = 0, found = 0, saved = 0, hecFound = 0;
   for (let i = 0; i < batchResults.length; i++) {
     const r = batchResults[i];
     if (!r.issns || !r.issns.length || (r.rank && r.rank.wosCategory)) continue;
@@ -1692,18 +1804,41 @@ async function fetchBatchWoSCategories() {
       if (res.stored) saved++;
       r.rank = r.rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
       r.rank.wosCategory = res.category;
+      // A WoS category supersedes any earlier HEC fallback on
+      // this row: HEC is only ever shown when there is no W/X.
+      delete r.rank.hecCategory;
+      delete r.rank.hecSource;
       // Saved by the worker as it fetched (the single save
       // point) — no panel-side save here any more.
       // No panel table any more: the enriched category lives
       // in the downloaded CSV, not in a row on screen.
+    } else if (!r.rank.wosCategory && (!r.rank || r.rank.source === "none")) {
+      // HEC fallback: a DOAJ listing gives HEC Y. Only for rows
+      // with no WoS category and no quartile — never an override.
+      const hec = await fetchHecCategory(r.issns, r.journal);
+      if (hec && hec.category) {
+        hecFound++;
+        r.rank = r.rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
+        r.rank.hecCategory = hec.category;
+        r.rank.hecSource = hec.source || "DOAJ";
+      }
+    }
+    // A found row with no ranking anywhere gets its honest
+    // label in the CSV note — a blank must never look like a
+    // missed fetch. (Checked after the HEC pass above, so a
+    // DOAJ-listed journal never gets this label.)
+    if (r.status === "found" && r.rank && r.rank.source === "none"
+        && !r.rank.wosCategory && !r.rank.hecCategory
+        && r.note.indexOf("Not ranked (not in WoS or Scopus)") === -1) {
+      r.note = (r.note ? r.note + ". " : "") + "Not ranked (not in WoS or Scopus)";
     }
     await sleep(300); // polite pacing for the MJL search
   }
-  return { checked, found, saved };
+  return { checked, found, saved, hecFound };
 }
 
 function wosPassText(wos) {
-  return `WoS categories: ${wos.found} found of ${wos.checked} checked${wos.found ? `, ${wos.saved} saved.` : "."}`;
+  return `WoS categories: ${wos.found} found of ${wos.checked} checked${wos.found ? `, ${wos.saved} saved.` : "."}` + (wos.hecFound ? ` HEC Y: ${wos.hecFound} found (DOAJ).` : "");
 }
 
 // "Get WoS categories (free)": manual re-check for rows still
