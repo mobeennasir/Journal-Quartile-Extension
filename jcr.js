@@ -6,6 +6,21 @@
 //     ISSN + data year: { quartile, JIF, WoS category, journal }.
 //   * Parse SJR CSV exports (scimagojr.com download) into the same
 //     keyed shape, clearly marked as SJR, never as JCR.
+//
+// REAL SJR FORMAT — verified 27 Nov 2026 against the user's own
+// download (scimagojr_2025_0_ipmx.csv, 11.25 MB, 32,193 journals):
+// semicolon-separated, quoted fields, decimal commas in numbers
+// (SJR 104,065 = 104.065), header
+// "Rank;Sourceid;Title;Type;Issn;Publisher;...;SJR;SJR Best
+// Quartile;H index;Total Docs. (2025);...;Categories;Areas",
+// Issn holds TWO ISSNs ("15424863, 00079235"), Categories holds
+// e.g. "Hematology (Q1); Oncology (Q1)", and there is NO Year
+// column — the year comes from the headers ("Total Docs.
+// (2025)") or the file name. The parser auto-detects the
+// delimiter and reads the year from the headers, so a real
+// export imports as-is. SJR rows are stored BY YEAR (one stored
+// set per data year, expiry next June); a lookup uses the
+// article's year and never another year's quartile.
 //   * Parse a Web of Science Master Journal List (MJL) export into
 //     ISSN -> WoS index (SCIE/SSCI/AHCI/ESCI) -> category W/X.
 //   * Look a journal/year up in those stores: JCR first, SJR only
@@ -59,9 +74,32 @@
 
   // ---------- CSV parsing (quoted fields, CRLF, BOM) ----------
 
+  // The real SCImago export (seen 27 Nov 2026, scimagojr_2025
+  // file, 32,193 journals) is SEMICOLON-separated with quoted
+  // fields and decimal commas ("104,065" = 104.065) — NOT the
+  // comma CSV the parser first assumed. So the delimiter is
+  // auto-detected from the first line: separators outside quotes
+  // are counted, and ';' wins when it outnumbers ','. Comma
+  // files (JCR, MJL, article lists, synthetic tests) are
+  // unaffected — their first lines have more commas than
+  // semicolons outside quotes.
+  function detectDelimiter(line) {
+    let commas = 0, semis = 0, inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (inQuotes) { if (ch === '"') inQuotes = false; }
+      else if (ch === '"') { inQuotes = true; }
+      else if (ch === ",") { commas++; }
+      else if (ch === ";") { semis++; }
+    }
+    return semis > commas ? ";" : ",";
+  }
+
   function parseCsv(text) {
     if (!text) return [];
     let s = String(text).replace(/^\uFEFF/, "");
+    const firstLine = s.split(/\r?\n/)[0] || "";
+    const delim = detectDelimiter(firstLine);
     const rows = [];
     let row = [];
     let field = "";
@@ -77,7 +115,7 @@
         }
       } else if (ch === '"') {
         inQuotes = true;
-      } else if (ch === ",") {
+      } else if (ch === delim) {
         row.push(field); field = "";
       } else if (ch === "\n") {
         row.push(field); field = "";
@@ -145,6 +183,19 @@
   function parseJif(value) {
     if (value === null || value === undefined) return null;
     const n = parseFloat(String(value).replace(/,/g, "").trim());
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // SJR score from the real SCImago export: a DECIMAL COMMA
+  // ("104,065" = 104.065, "0,85" = 0.85). Do NOT use parseJif
+  // here — it strips commas, which would store 104065 instead
+  // of 104.065. A value with a dot is Anglo format ("17.5") and
+  // is parsed as-is, commas stripped.
+  function parseSjrScore(value) {
+    if (value === null || value === undefined) return null;
+    const s = String(value).trim();
+    if (!s) return null;
+    const n = parseFloat(s.indexOf(".") === -1 ? s.replace(",", ".") : s.replace(/,/g, ""));
     return Number.isFinite(n) ? n : null;
   }
 
@@ -372,7 +423,13 @@
     const headers = table[headerIdx];
     const colIssn = findColumn(headers, ["issn"]);
     const colJournal = findJournalColumn(headers);
-    const colYear = findColumn(headers, ["year"]);
+    // Year column: EXACT match only. The real SJR headers contain
+    // "Total Docs. (3years)", whose normalised form contains
+    // "year" — a substring search would take that column and read
+    // document counts (1955, 1971, ...) as years. The real export
+    // has no Year column at all; the year comes from the headers
+    // ("Total Docs. (2025)") or the file name instead (below).
+    const colYear = headers.findIndex((h) => normaliseHeader(h) === "year");
     const colQuartile = findColumn(headers, ["sjrbestquartile", "bestquartile", "quartile"]);
     const colSjr = findColumn(headers, ["sjr"]);
     const colCategories = findColumn(headers, ["categories", "category"]);
@@ -381,18 +438,35 @@
       out.skipped = table.length - headerIdx - 1;
       return out;
     }
+    // The year these rows describe. The real SCImago export has
+    // NO Year column — the year lives in the headers ("Total
+    // Docs. (2025)") — so: Year column first, then the year
+    // passed in (file name / year select / auto-fetch), then a
+    // year found in any header cell. Without a year the rows
+    // cannot be stored year-correctly, so they are skipped and
+    // the warning says why instead of a silent "no data".
+    let fileYear = opts.year ? parseYear(String(opts.year)) : null;
+    if (!fileYear) {
+      for (const h of headers) {
+        const y = parseYear(h);
+        if (y) { fileYear = y; break; }
+      }
+    }
+    if (colYear === -1 && !fileYear) {
+      out.warnings.push("No year in this file: no Year column, and no year in the headers or file name. SJR data is stored by year, so the rows were skipped.");
+    }
     for (let r = headerIdx + 1; r < table.length; r++) {
       const row = table[r];
       if (!row || row.every((c) => String(c).trim() === "")) continue;
       const cell = (i) => (i >= 0 && i < row.length ? String(row[i]).trim() : "");
       const issns = parseIssnList(cell(colIssn));
-      const year = colYear >= 0 ? parseYear(cell(colYear)) : (opts.year || null);
+      const year = colYear >= 0 ? parseYear(cell(colYear)) : fileYear;
       const quartile = parseQuartile(cell(colQuartile));
       if (!issns.length || !year || !quartile) { out.skipped++; continue; }
       issns.forEach((issn) => {
         out.rows.push({
           issn: issn, journal: cell(colJournal), year: year,
-          quartile: quartile, sjr: parseJif(cell(colSjr)),
+          quartile: quartile, sjr: parseSjrScore(cell(colSjr)),
           categories: cell(colCategories), sourceFile: sourceFile,
         });
       });
@@ -824,11 +898,28 @@
     return m !== null && m < 0;
   }
 
+  // The SJR year a stored file covers: recorded at import, or
+  // read from an auto-fetch file name ("SJR 2025 (auto-fetch)").
+  function sjrFileYear(file) {
+    if (!file) return null;
+    if (file.year) return file.year;
+    const m = String(file.fileName || "").match(/SJR\s+(\d{4})/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  // Does the stored SJR data cover this year (a file for that
+  // year, not yet expired)? Used so a lookup fetches only the
+  // years it actually needs, and never re-fetches a stored year.
+  function sjrFilesCoverYear(meta, year, fromDate) {
+    if (!meta || !meta.sjrFiles || !year) return false;
+    return meta.sjrFiles.some((f) => sjrFileYear(f) === year && !isExpired(f.importedAt, "sjr", fromDate));
+  }
+
   const api = {
     normaliseIssn: normaliseIssn, formatIssn: formatIssn,
     parseIssnList: parseIssnList,
     parseCsv: parseCsv, rowsToCsv: rowsToCsv,
-    parseQuartile: parseQuartile, parseJif: parseJif, parseYear: parseYear,
+    parseQuartile: parseQuartile, parseJif: parseJif, parseYear: parseYear, parseSjrScore: parseSjrScore,
     wosCategoryFromIndex: wosCategoryFromIndex,
     parseJcrText: parseJcrText, parseMJLText: parseMJLText,
     parseSjrText: parseSjrText, parseArticleListText: parseArticleListText,
@@ -840,6 +931,7 @@
     expiryMonthLabel: expiryMonthLabel,
     monthsLeft: monthsLeft, monthsLeftText: monthsLeftText,
     validUntilText: validUntilText, isExpired: isExpired,
+    sjrFileYear: sjrFileYear, sjrFilesCoverYear: sjrFilesCoverYear,
   };
 
   if (typeof module !== "undefined" && module.exports) {

@@ -11,6 +11,10 @@ const MAILTO = "mubeennasir117@gmail.com";
 const DATA = (typeof JournalQuartileData !== "undefined") ? JournalQuartileData : null;
 const XLSX = (typeof JournalQuartileXlsx !== "undefined") ? JournalQuartileXlsx : null;
 const NET = (typeof JournalQuartileNet !== "undefined") ? JournalQuartileNet : null;
+const FREE = (typeof JournalQuartileFreeData !== "undefined") ? JournalQuartileFreeData : null;
+// SJR years currently being fetched (one promise per year), so a
+// batch with many rows from the same year fetches it once.
+const sjrFetchInFlight = new Map();
 // Cache of fetched articles (DOI and title lookups), so a repeat
 // lookup returns instantly without re-fetching.
 const articleCache = NET ? new NET.ArticleCache(200) : null;
@@ -98,6 +102,54 @@ async function safeGetRank(issns, year) {
     showStorageFallbackNote();
     try { return await store.getRank(issns, year); } catch (e) { return null; }
   }
+}
+
+// ---------- SJR year, set automatically from the article ----------
+// A lookup must never need the user to pick the SJR year by hand:
+// the year comes from the article's publication year, and the
+// extension fetches SJR data for exactly that year when it is not
+// already stored. Batch rows fetch each distinct year once.
+function sjrLatestYear() {
+  if (FREE && FREE.sjrLatestYear) return FREE.sjrLatestYear();
+  const d = new Date();
+  return d.getMonth() >= 5 ? d.getFullYear() - 1 : d.getFullYear() - 2;
+}
+
+// Fetch SJR data for one publication year, unless it is already
+// stored (and unexpired) or not released yet. Returns
+// { state, year }: "ready" (already stored), "fetched",
+// "not-released" (year after the latest SJR release — SJR data
+// for year Y appears in June Y+1), "challenge" (the human check
+// never cleared), "blocked" (the download was blocked), "failed".
+// Concurrent calls for the same year share one fetch.
+async function ensureSjrYear(year) {
+  const y = parseInt(year, 10);
+  if (!y) return { state: "invalid", year: y };
+  if (y > sjrLatestYear()) return { state: "not-released", year: y };
+  try {
+    const meta = await getStore().getMeta();
+    if (DATA.sjrFilesCoverYear(meta, y)) return { state: "ready", year: y };
+  } catch (err) { /* fall through and try the fetch */ }
+  if (sjrFetchInFlight.has(y)) return sjrFetchInFlight.get(y);
+  const run = (async () => {
+    let res = await sendBackgroundMessage({ type: "fetchSjrExport", year: y }, 90000);
+    if (res && res.rows) {
+      refreshImportStatus();
+      return { state: "fetched", year: y };
+    }
+    if (res && (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
+      res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 120000);
+      if (res && res.rows) {
+        refreshImportStatus();
+        return { state: "fetched", year: y };
+      }
+      if (res && res.error === "challenge") return { state: "challenge", year: y };
+      return { state: "blocked", year: y };
+    }
+    return { state: "failed", year: y };
+  })();
+  sjrFetchInFlight.set(y, run);
+  try { return await run; } finally { sjrFetchInFlight.delete(y); }
 }
 
 // ---------- Mode tabs ----------
@@ -240,7 +292,9 @@ function normaliseOpenAlex(work) {
 // ---------- Ranking rows for a single result ----------
 // Every number carries its source and year. A missing JCR value is
 // stated as missing — never another year's rank.
-function rankingRows(data, rank) {
+// sjrNote (from ensureSjrYear): "not-released" or "blocked" —
+// the SJR row then says why, instead of the generic no-data line.
+function rankingRows(data, rank, sjrNote) {
   const year = data.year || "";
   const rows = [];
   const wos = rank && rank.wosCategory ? rank.wosCategory : "";
@@ -252,10 +306,16 @@ function rankingRows(data, rank) {
     rows.push(["Impact Factor — JCR (" + year + ")", "No JCR data for this year"]);
     rows.push(["SJR quartile — fallback, NOT JCR (" + year + ")",
       rank.quartile + (rank.sjr !== null && rank.sjr !== undefined ? " (SJR " + rank.sjr + ")" : "")]);
+    // Per-year store, stated plainly: this year's SJR data is
+    // saved in the DB, so the lookup used it with no re-import.
+    rows.push(["SJR data", "Saved for " + year]);
   } else {
     rows.push(["JCR quartile (" + year + ")", "No JCR data for this year"]);
     rows.push(["Impact Factor — JCR (" + year + ")", "No JCR data for this year"]);
-    rows.push(["SJR quartile — fallback, NOT JCR (" + year + ")", "No SJR data for this year"]);
+    rows.push(["SJR quartile — fallback, NOT JCR (" + year + ")",
+      sjrNote === "not-released" ? "No SJR data for " + year + " yet"
+      : sjrNote === "blocked" ? "SJR download blocked — tap Get free SJR data"
+      : "No SJR data for this year"]);
   }
   rows.push(["WoS category", wos ? wos + (wos === "W" ? " — SCIE, SSCI or AHCI" : " — ESCI (Emerging)") : "Unknown — checking free WoS list…"]);
   if (rank && rank.source !== "none" && rank.sourceFile) {
@@ -264,10 +324,31 @@ function rankingRows(data, rank) {
   return rows;
 }
 
-async function showResult(data, sourceName) {
-  const rank = (data.issns && data.issns.length && data.year)
+async function showResult(data, sourceName, opts) {
+  const autoFetchSjr = !opts || opts.autoFetchSjr !== false;
+  let rank = (data.issns && data.issns.length && data.year)
     ? await safeGetRank(data.issns, parseInt(data.year, 10))
     : null;
+  let sjrNote = null;
+  // No SJR row for the article's year? Fetch that year now — the
+  // year comes from the article, never from the user. JCR and SJR
+  // rows already stored need no fetch at all.
+  if (autoFetchSjr && data.year && (!rank || rank.source === "none")) {
+    if (statusEl) statusEl.textContent = `Getting SJR data for ${data.year}…`;
+    const ensured = await ensureSjrYear(parseInt(data.year, 10));
+    if (ensured.state === "fetched" || ensured.state === "ready") {
+      rank = await safeGetRank(data.issns, parseInt(data.year, 10));
+    } else if (ensured.state === "not-released" || ensured.state === "blocked" || ensured.state === "challenge") {
+      sjrNote = ensured.state === "not-released" ? "not-released" : "blocked";
+      // Point the manual import at this year: set the SJR year
+      // select to the article's year, so "Get free SJR data" and
+      // "Import SJR file" below act on the year that is missing.
+      if (sjrNote === "blocked" && sjrYearEl) {
+        const hasOption = Array.from(sjrYearEl.options || []).some((o) => o.value === String(data.year));
+        if (hasOption) sjrYearEl.value = String(data.year);
+      }
+    }
+  }
   const rankForExport = rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
   const rows = [
     ["Title", escapeHtml(data.title || "—")],
@@ -280,7 +361,7 @@ async function showResult(data, sourceName) {
       ? `<a href="https://doi.org/${encodeURIComponent(data.doi)}" target="_blank" rel="noopener">https://doi.org/${escapeHtml(data.doi)}</a>`
       : "—"],
   ];
-  rankingRows(data, rank).forEach(([k, v]) => rows.push([k, v]));
+  rankingRows(data, rank, sjrNote).forEach(([k, v]) => rows.push([k, v]));
   const sourceClass = sourceName === "OpenAlex" ? "source openalex" : "source";
   const rankBadge = rank && rank.source === "JCR"
     ? `<span class="source jcr">Ranking: JCR</span>`
@@ -701,7 +782,8 @@ if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
     const last = result && result.lastLookup;
     if (!last || !last.data) return;
     if (last.input) inputEl.value = last.input;
-    showResult(last.data, last.sourceName || "Crossref");
+    // Restore only: do not re-fetch SJR data on panel reopen.
+    showResult(last.data, last.sourceName || "Crossref", { autoFetchSjr: false });
   });
 }
 
@@ -762,15 +844,6 @@ function latestFile(files) {
   return files && files.length ? files[files.length - 1] : null;
 }
 
-// The SJR year a stored file covers: recorded at import, or
-// read from an auto-fetch file name ("SJR 2025 (auto-fetch)").
-function sjrFileYear(file) {
-  if (!file) return null;
-  if (file.year) return file.year;
-  const m = String(file.fileName || "").match(/SJR\s+(\d{4})/);
-  return m ? parseInt(m[1], 10) : null;
-}
-
 function refreshImportStatus() {
   getStore().getMeta().then((meta) => {
     const jcrFile = latestFile(meta.jcrFiles);
@@ -813,7 +886,7 @@ function renderFreeDataStatus(meta) {
     const mjlFile = latestFile(meta.mjlFiles);
     let sjrLine, mjlLine;
     if (meta.sjrRows && sjrFile && sjrFile.importedAt) {
-      const year = sjrFileYear(sjrFile);
+      const year = DATA.sjrFileYear(sjrFile);
       sjrLine = `SJR: ready${year ? ", " + year : ""}. ${DATA.validUntilText(sjrFile.importedAt, "sjr")}.`;
     } else if (auto && auto.sjr && auto.sjr.state === "blocked") {
       sjrLine = "SJR: auto-fetch blocked (bot check). Tap Get free SJR data.";
@@ -927,7 +1000,10 @@ sjrImportBtn.addEventListener("click", async () => {
     const warnings = [];
     for (const file of files) {
       const text = await file.text();
-      const parsed = DATA.parseSjrText(text, { fileName: file.name });
+      // Year from the file name when the file itself has none
+      // (the real SCImago export has no Year column — the year
+      // is in the headers or the file name, e.g. scimagojr_2025).
+      const parsed = DATA.parseSjrText(text, { fileName: file.name, year: DATA.parseYear(file.name) });
       if (parsed.rows.length) {
         const importedAt = new Date().toISOString();
         // The year this file covers (most common row year) and its
@@ -944,7 +1020,7 @@ sjrImportBtn.addEventListener("click", async () => {
     }
     sjrStatusEl.textContent = total
       ? `Imported ${total} SJR rows (${skipped} skipped). Fallback only, always labelled NOT JCR. ${warnings.join(" ")}`
-      : `Nothing imported. ${warnings.join(" ")} Check the file is an SJR CSV with ISSN and SJR Best Quartile columns.`;
+      : `Nothing imported — ${skipped} row(s) read but skipped. ${warnings.join(" ")} Check the file is an SJR CSV with ISSN and SJR Best Quartile columns.`;
     if (!total) sjrStatusEl.classList.add("error"); else sjrStatusEl.classList.remove("error");
   } catch (err) {
     sjrStatusEl.textContent = `Import failed: ${err.message}`;
@@ -1031,11 +1107,11 @@ if (sjrFetchBtn) {
     sjrFetchBtn.disabled = true;
     try {
       const meta = await getStore().getMeta();
-      const latest = latestFile(meta.sjrFiles);
-      const latestYear = sjrFileYear(latest);
-      if (latest && latest.importedAt && !DATA.isExpired(latest.importedAt, "sjr")
-          && (!latestYear || latestYear === year)) {
-        sjrStatusEl.textContent = `SJR ${year} data already stored. ${DATA.validUntilText(latest.importedAt, "sjr")}.`;
+      // Already stored for the chosen year (any file, not just the
+      // latest)? Then there is nothing to fetch for that year.
+      if (DATA.sjrFilesCoverYear(meta, year)) {
+        const file = meta.sjrFiles.find((f) => DATA.sjrFileYear(f) === year);
+        sjrStatusEl.textContent = `SJR ${year} data already stored. ${DATA.validUntilText(file.importedAt, "sjr")}.`;
         sjrStatusEl.classList.remove("error");
         return;
       }
@@ -1176,7 +1252,7 @@ function renderBatchRow(result) {
     rank.source === "JCR" ? (rank.quartile || "—") : (rank.source === "SJR" ? "— (see SJR)" : "No JCR data"),
     rank.source === "JCR" ? ((rank.jif === null || rank.jif === undefined) ? "—" : String(rank.jif)) : "No JCR data",
     rank.wosCategory || "Unknown",
-    rank.source === "JCR" ? "JCR" : rank.source === "SJR" ? `SJR fallback — NOT JCR (${rank.quartile || ""})` : (result.note || "Not found"),
+    rank.source === "JCR" ? "JCR" : rank.source === "SJR" ? `SJR fallback — NOT JCR (${rank.quartile || ""}${result.year ? ", " + result.year : ""})` : (result.note || "Not found"),
   ];
   cells.forEach((text) => {
     const td = document.createElement("td");
@@ -1195,6 +1271,7 @@ async function runBatch(rows) {
   batchTestsetBtn.disabled = true;
   let resolvedDoi = 0, found = 0;
   const seenDois = new Map(); // DOI -> first row number (Scholar lists some works twice)
+  const sjrYearsFetched = new Set(); // publication years whose SJR data was fetched during this run
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     batchStatusEl.textContent = `Checking article ${i + 1} of ${rows.length}: ${row.title.slice(0, 60)}…`;
@@ -1216,7 +1293,19 @@ async function runBatch(rows) {
           ? article.data.issns
           : (row.issn ? [row.issn] : []);
         const year = article.data.year ? parseInt(article.data.year, 10) : (row.year || null);
-        const rank = (issns.length && year) ? await safeGetRank(issns, year) : null;
+        let rank = (issns.length && year) ? await safeGetRank(issns, year) : null;
+        // No SJR row for this row's publication year? Fetch that
+        // year now — the year comes from the article, never from
+        // the user. ensureSjrYear fetches each distinct year once
+        // per run and skips years already stored.
+        if (rank && rank.source === "none" && year) {
+          batchStatusEl.textContent = `Checking article ${i + 1} of ${rows.length}: getting SJR data for ${year}…`;
+          const ensured = await ensureSjrYear(year);
+          if (ensured.state === "fetched") {
+            sjrYearsFetched.add(year);
+            rank = await safeGetRank(issns, year);
+          }
+        }
         let note = article.resolvedBy || "";
         const doiKey = (article.data.doi || "").toLowerCase();
         if (doiKey) {
@@ -1238,7 +1327,7 @@ async function runBatch(rows) {
     await sleep(500); // polite pacing for the Crossref polite pool
   }
   batchProgressBarEl.style.width = "100%";
-  batchStatusEl.textContent = `Done: ${rows.length} checked, ${found} found, ${resolvedDoi} with a DOI. ${batchResults.filter((r) => r.rank && r.rank.source === "JCR").length} with JCR data, ${batchResults.filter((r) => r.rank && r.rank.source === "SJR").length} SJR fallback only, ${batchResults.filter((r) => !r.rank || r.rank.source === "none").length} with no ranking data.`;
+  batchStatusEl.textContent = `Done: ${rows.length} checked, ${found} found, ${resolvedDoi} with a DOI. ${batchResults.filter((r) => r.rank && r.rank.source === "JCR").length} with JCR data, ${batchResults.filter((r) => r.rank && r.rank.source === "SJR").length} SJR fallback only, ${batchResults.filter((r) => !r.rank || r.rank.source === "none").length} with no ranking data.${sjrYearsFetched.size ? ` SJR data fetched for ${[...sjrYearsFetched].sort().join(", ")}.` : ""}`;
   batchRunBtn.disabled = false;
   batchTestsetBtn.disabled = false;
   if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {

@@ -279,7 +279,7 @@ async function autoFetchFreeData() {
       const done = await importSjrText(fetched.text, sjrYear);
       status.sjr = done.rows
         ? { state: "ready", year: sjrYear, rows: done.rows, at: now }
-        : { state: "failed", year: sjrYear, at: now, detail: "SJR file had no usable rows" };
+        : { state: "failed", year: sjrYear, at: now, detail: `SJR file had no usable rows (${done.skipped} skipped)` };
     }
   } catch (err) {
     status.sjr = { state: "failed", year: sjrYear, at: now, detail: String(err && err.message || err) };

@@ -490,7 +490,7 @@ async function main() {
     popupJs.indexOf('sendBackgroundMessage({ type: "fetchSjrExport"') !== -1
     && popupJs.indexOf('sendBackgroundMessage({ type: "fetchSjrViaTab"') !== -1);
   check("popup.js SJR button does not re-fetch valid stored data",
-    popupJs.indexOf("data already stored") !== -1 && popupJs.indexOf('DATA.isExpired(latest.importedAt, "sjr")') !== -1);
+    popupJs.indexOf("data already stored") !== -1 && popupJs.indexOf("DATA.sjrFilesCoverYear(meta, year)") !== -1);
   check("popup.js shows remaining time in the status lines",
     (popupJs.match(/DATA\.validUntilText\(/g) || []).length >= 4);
   check("popup.js batch WoS button checks each row and stores the answer",
@@ -674,6 +674,144 @@ async function main() {
     popupJs.indexOf('getElementById("sjr-open-page")') !== -1
     && popupJs.indexOf("journalrank.php?year=${year}") !== -1
     && popupJs.indexOf("chrome.tabs.create({ url, active: true })") !== -1);
+
+  console.log("== 25. SJR year is automatic from the article's publication year (27 Nov 2026) ==");
+  // CURRENT BEHAVIOUR BEFORE THIS FIX (verified in code): the
+  // store lookup was already year-correct (exact issn|year, never
+  // another year's rank), but NOTHING ever fetched SJR data for
+  // the article's year — auto-fetch only downloaded the latest
+  // year (sjrLatestYear), and a 2021 article with only 2025 SJR
+  // stored showed "No SJR data for this year". The only way to
+  // get 2021 data was the manual button with the year select
+  // changed by hand. Now showResult/runBatch fetch the article's
+  // year themselves when it is missing.
+  // Pure helpers (jcr.js).
+  check("sjrFileYear: recorded year wins",
+    DATA.sjrFileYear({ fileName: "SJR 2025 (auto-fetch)", year: 2021 }) === 2021);
+  check("sjrFileYear: auto-fetch file name gives the year",
+    DATA.sjrFileYear({ fileName: "SJR 2025 (auto-fetch)" }) === 2025);
+  check("sjrFileYear: no year anywhere gives null",
+    DATA.sjrFileYear({ fileName: "scimagojr.csv" }) === null);
+  const sjrMeta2021 = { sjrFiles: [{ fileName: "SJR 2021 (auto-fetch)", year: 2021, importedAt: "2026-01-15T00:00:00.000Z" }] };
+  check("sjrFilesCoverYear: stored unexpired 2021 covers 2021",
+    DATA.sjrFilesCoverYear(sjrMeta2021, 2021, "2026-03-01"));
+  check("sjrFilesCoverYear: stored 2021 does NOT cover 2019",
+    !DATA.sjrFilesCoverYear(sjrMeta2021, 2019, "2026-03-01"));
+  check("sjrFilesCoverYear: expired file (imported Jan 2026, checked Dec 2026) does NOT cover",
+    !DATA.sjrFilesCoverYear(sjrMeta2021, 2021, "2026-12-01"));
+  check("sjrFilesCoverYear: no files covers nothing",
+    !DATA.sjrFilesCoverYear({ sjrFiles: [] }, 2021, "2026-03-01"));
+  // Latest SJR year rule (June release): data for year Y appears
+  // in June Y+1.
+  check("sjrLatestYear: 1 June 2026 -> 2025", FREE.sjrLatestYear("2026-06-01") === 2025);
+  check("sjrLatestYear: 31 May 2026 -> 2024", FREE.sjrLatestYear("2026-05-31") === 2024);
+  check("sjrLatestYear: 15 Jan 2027 -> 2025", FREE.sjrLatestYear("2027-01-15") === 2025);
+  // Store behaviour: a year with no SJR rows is "none", never
+  // another year's quartile — the auto-fetch must fill the gap,
+  // not the lookup.
+  const sjrStore2021 = new DATA.MemoryStore();
+  await sjrStore2021.putSjr(sjr.rows, { fileName: "sjr", rows: sjr.rows.length });
+  check("SJR stored for 2022 only: 2022 lookup finds it (J Plant Growth Regul, Q2)",
+    (await sjrStore2021.getRank(["07217595"], 2022)).source === "SJR");
+  check("SJR stored for 2022 only: 2019 lookup is none, never 2022's quartile",
+    (await sjrStore2021.getRank(["07217595"], 2019)).source === "none");
+  // Wiring: popup.js.
+  check("popup defines ensureSjrYear and checks stored coverage before fetching",
+    popupJs.indexOf("async function ensureSjrYear(year)") !== -1
+    && popupJs.indexOf("DATA.sjrFilesCoverYear(meta, y)") !== -1);
+  check("popup ensureSjrYear returns not-released for a year after the latest SJR release",
+    popupJs.indexOf('if (y > sjrLatestYear()) return { state: "not-released", year: y }') !== -1);
+  check("popup ensureSjrYear shares one fetch per year (in-flight dedupe)",
+    popupJs.indexOf("sjrFetchInFlight.has(y)") !== -1 && popupJs.indexOf("sjrFetchInFlight.set(y, run)") !== -1);
+  check("popup ensureSjrYear tries the background fetch, then the browser-tab download",
+    popupJs.indexOf('sendBackgroundMessage({ type: "fetchSjrExport", year: y }, 90000)') !== -1
+    && popupJs.indexOf('sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 120000)') !== -1);
+  check("popup showResult fetches the article's SJR year when the rank is missing",
+    popupJs.indexOf('if (autoFetchSjr && data.year && (!rank || rank.source === "none"))') !== -1
+    && popupJs.indexOf("const ensured = await ensureSjrYear(parseInt(data.year, 10))") !== -1
+    && popupJs.indexOf("rank = await safeGetRank(data.issns, parseInt(data.year, 10))") !== -1);
+  check("popup showResult does NOT auto-fetch on restore (last lookup reopen)",
+    popupJs.indexOf('showResult(last.data, last.sourceName || "Crossref", { autoFetchSjr: false })') !== -1);
+  check("popup SJR row says plainly when the year's data is not released yet",
+    popupJs.indexOf('"No SJR data for " + year + " yet"') !== -1);
+  check("popup SJR row says plainly when the download was blocked",
+    popupJs.indexOf('"SJR download blocked — tap Get free SJR data"') !== -1);
+  check("popup batch fetches each row's publication year when its rank is missing",
+    popupJs.indexOf('if (rank && rank.source === "none" && year)') !== -1
+    && popupJs.indexOf("const ensured = await ensureSjrYear(year)") !== -1
+    && popupJs.indexOf("sjrYearsFetched.add(year)") !== -1);
+  check("popup batch final status lists the SJR years fetched",
+    popupJs.indexOf("SJR data fetched for ${[...sjrYearsFetched].sort().join(") !== -1);
+  check("panel loads freedata.js so the panel can use sjrLatestYear",
+    panelHtml.indexOf('<script src="freedata.js"></script>') !== -1);
+  check("popup SJR button pre-check uses stored-year coverage, not just the latest file",
+    popupJs.indexOf("DATA.sjrFilesCoverYear(meta, year)") !== -1
+    && popupJs.indexOf("DATA.isExpired(latest.importedAt, \"sjr\")") === -1);
+
+  console.log("== 26. Real SJR export format: semicolons, decimal commas, no Year column (27 Nov 2026) ==");
+  // ROOT CAUSE of the user's failed import (real file
+  // scimagojr_2025_0_ipmx.csv, 11.25 MB, 32,193 journals):
+  // parseSjrText returned 0 rows, 32,193 skipped, no warnings.
+  // The real export is semicolon-separated with quoted fields
+  // and decimal commas — the parser only split on commas, so
+  // the whole line was one field and every row failed the
+  // ISSN/quartile check. Fixture: the real file's header + first
+  // 20 rows, copied verbatim.
+  const realSjrText = fs.readFileSync(path.join(DIR, "real-sjr-2025-sample.csv"), "utf8");
+  const realSjr = DATA.parseSjrText(realSjrText, { fileName: "scimagojr_2025_0_ipmx.csv" });
+  check("real SJR sample: 20 journals -> 38 ISSN rows (18 with two ISSNs, 2 with one)",
+    realSjr.rows.length === 38, "got " + realSjr.rows.length);
+  check("real SJR sample: no rows skipped, no warnings",
+    realSjr.skipped === 0 && realSjr.warnings.length === 0, "skipped=" + realSjr.skipped + " warnings=" + JSON.stringify(realSjr.warnings));
+  check("real SJR sample: year comes from the headers (Total Docs. (2025)), no Year column",
+    realSjr.rows.every((r) => r.year === 2025));
+  const realCaa = realSjr.rows.filter((r) => r.issn === "15424863" || r.issn === "00079235");
+  check("real SJR sample: Ca-A Cancer Journal for Clinicians, both ISSNs, Q1, SJR 104.065 (decimal comma, not 104065)",
+    realCaa.length === 2 && realCaa.every((r) => r.quartile === "Q1" && Math.abs(r.sjr - 104.065) < 0.001), JSON.stringify(realCaa));
+  const realNrmcb = realSjr.rows.find((r) => r.issn === "14710072");
+  check("real SJR sample: Nature Reviews Molecular Cell Biology Q1, SJR 35.568",
+    realNrmcb && realNrmcb.quartile === "Q1" && Math.abs(realNrmcb.sjr - 35.568) < 0.001, JSON.stringify(realNrmcb));
+  check("parseSjrScore: decimal comma 104,065 -> 104.065", DATA.parseSjrScore("104,065") === 104.065);
+  check("parseSjrScore: Anglo dot 17.5 -> 17.5", DATA.parseSjrScore("17.5") === 17.5);
+  check("parseSjrScore: 0,85 -> 0.85", DATA.parseSjrScore("0,85") === 0.85);
+  // Delimiter detection: semicolon file vs comma file.
+  check("parseCsv auto-detects semicolons (quoted field with a semicolon inside stays one field)",
+    eq(DATA.parseCsv('a;b;"x;y"\n1;2;3\n'), [["a", "b", "x;y"], ["1", "2", "3"]]));
+  check("parseCsv still splits comma files",
+    eq(DATA.parseCsv('a,b\n1,2\n'), [["a", "b"], ["1", "2"]]));
+  // A file with no year anywhere: rows are skipped WITH a warning
+  // naming the reason, never silently.
+  const noYear = DATA.parseSjrText("Rank,Title,Issn,SJR,SJR Best Quartile\n1,Test Journal,0028-0836,17.5,Q1\n", { fileName: "sjr.csv" });
+  check("SJR file with no year anywhere: 0 rows, warning names the missing year",
+    noYear.rows.length === 0 && noYear.warnings.some((w) => w.indexOf("No year") !== -1), JSON.stringify(noYear.warnings));
+  // Store round-trip on the real sample (year present vs absent):
+  // year present -> saved rows look up by ISSN; year absent ->
+  // source none, never another year's quartile.
+  const realStore = new DATA.MemoryStore();
+  await realStore.putSjr(realSjr.rows, { fileName: "scimagojr_2025_0_ipmx.csv", year: 2025, rows: realSjr.rows.length, importedAt: "2026-11-27T00:00:00.000Z", expires: DATA.sjrExpiresAt("2026-11-27") });
+  const realMeta = await realStore.getMeta();
+  check("store: real sample saved, meta shows 2025 file with June 2027 expiry",
+    realMeta.sjrRows === 38 && DATA.sjrFilesCoverYear(realMeta, 2025, "2026-11-27") && !DATA.sjrFilesCoverYear(realMeta, 2024, "2026-11-27"),
+    JSON.stringify(realMeta.sjrFiles));
+  const storedCaa = await realStore.getRank(["15424863"], 2025);
+  check("store: Ca-A 2025 looks up from the store (SJR Q1, saved)",
+    storedCaa && storedCaa.source === "SJR" && storedCaa.quartile === "Q1" && Math.abs(storedCaa.sjr - 104.065) < 0.001, JSON.stringify(storedCaa));
+  check("store: Ca-A 2024 (year absent) is none, never 2025's quartile",
+    (await realStore.getRank(["15424863"], 2024)).source === "none");
+  // Wiring: popup says the year is saved, and points the manual
+  // import at the missing year when the fetch is blocked.
+  check("popup result says 'SJR data Saved for {year}' when the year's SJR data is stored",
+    popupJs.indexOf('rows.push(["SJR data", "Saved for " + year])') !== -1);
+  check("popup sets the SJR year select to the article's year when the fetch is blocked",
+    popupJs.indexOf("sjrYearEl.value = String(data.year)") !== -1);
+  check("popup batch SJR cell shows the year next to the quartile",
+    popupJs.indexOf('SJR fallback — NOT JCR (${rank.quartile || ""}${result.year ? ", " + result.year : ""})') !== -1);
+  check("popup manual SJR import reads the year from the file name",
+    popupJs.indexOf("year: DATA.parseYear(file.name)") !== -1);
+  check("popup import failure names how many rows were read but skipped",
+    popupJs.indexOf("row(s) read but skipped") !== -1);
+  check("background auto-fetch failure names how many rows were skipped",
+    bgJs.indexOf("SJR file had no usable rows (${done.skipped} skipped)") !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));
