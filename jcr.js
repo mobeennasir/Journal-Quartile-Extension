@@ -132,8 +132,15 @@
     return rows;
   }
 
+  // Formula injection: a cell that starts with =, +, - or @ runs
+  // as a formula when the downloaded CSV is opened in Excel, so a
+  // hostile article title or journal name from an API could
+  // execute code on the user's machine. Prefix such a cell with
+  // a single quote so Excel treats it as plain text. A plain
+  // negative number ("-5") is left alone — it is not a formula.
   function csvEscape(value) {
-    const s = value === null || value === undefined ? "" : String(value);
+    let s = value === null || value === undefined ? "" : String(value);
+    if (/^\s*[=+\-@]/.test(s) && !/^\s*-?\d+(\.\d+)?\s*$/.test(s)) s = "'" + s;
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
 
@@ -555,9 +562,34 @@
     // Instead they live in a separate map keyed by ISSN alone.
     if (!this.mjl) this.mjl = new Map();
     rows.forEach((row) => { if (row.issn) this.mjl.set(row.issn, row); });
-    if (fileMeta) this.meta.mjlFiles.push(fileMeta);
+    // One meta entry per file name: repeated auto-saves of the
+    // same list replace the entry instead of appending one per
+    // article (the batch used to append dozens).
+    if (fileMeta) {
+      const list = this.meta.mjlFiles;
+      const last = list[list.length - 1];
+      if (last && last.fileName === fileMeta.fileName) list[list.length - 1] = fileMeta;
+      else list.push(fileMeta);
+    }
     this.meta.importedAt = new Date().toISOString();
     return Promise.resolve(rows.length);
+  };
+  // One stored WoS category by ISSN, or null. Rows stamped with
+  // an expiry (automatic per-article saves) are honoured; rows
+  // without one (manual file imports) are always valid. This is
+  // the store-first read: a journal fetched before is answered
+  // here with no tab opened.
+  MemoryStore.prototype.getMjl = function (issns) {
+    const list = (issns || []).filter(Boolean);
+    for (const issn of list) {
+      const row = this.mjl ? this.mjl.get(issn) : null;
+      if (row && row.wosCategory) {
+        if (!row.expires || new Date(row.expires).getTime() > Date.now()) {
+          return Promise.resolve({ category: row.wosCategory, index: row.wosIndex || "", issn });
+        }
+      }
+    }
+    return Promise.resolve(null);
   };
   MemoryStore.prototype.getRank = function (issns, year) {
     return Promise.resolve(lookupRankSync(this, issns, year));
@@ -620,11 +652,13 @@
     // 4. Nothing for this ISSN+year — but a WoS category may still
     //    be known from the MJL import (category is current, not
     //    year-correct, so it is returned separately and labelled).
+    //    An expired automatic row does not count (same rule as
+    //    getMjl); a row without an expiry is always valid.
     let wosCategory = "";
     if (store.mjl) {
       for (const issn of list) {
         const row = store.mjl.get(issn);
-        if (row && row.wosCategory) { wosCategory = row.wosCategory; break; }
+        if (row && row.wosCategory && (!row.expires || new Date(row.expires).getTime() > Date.now())) { wosCategory = row.wosCategory; break; }
       }
     }
     return { source: "none", quartile: "", jif: null, wosCategory: wosCategory,
@@ -694,12 +728,47 @@
       get.onsuccess = () => {
         const meta = get.result || { id: "meta", jcrFiles: [], sjrFiles: [], mjlFiles: [], importedAt: null };
         const key = kind + "Files";
-        meta[key] = (meta[key] || []).concat([fileMeta]);
+        // One meta entry per file name: repeated auto-saves of the
+        // same list replace the entry instead of appending one
+        // per article.
+        const list = meta[key] || [];
+        const last = list[list.length - 1];
+        if (last && last.fileName === fileMeta.fileName) list[list.length - 1] = fileMeta;
+        else list.push(fileMeta);
+        meta[key] = list;
         meta.importedAt = new Date().toISOString();
         os.put(meta);
       };
       return null;
     });
+  };
+  // One stored WoS category by ISSN, or null. Same rule as the
+  // MemoryStore twin: an expired automatic row does not count,
+  // a row without an expiry is always valid.
+  IdbStore.prototype.getMjl = function (issns) {
+    const self = this;
+    const list = (issns || []).filter(Boolean);
+    if (!list.length) return Promise.resolve(null);
+    return self._open().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(["mjl"], "readonly");
+      let found = null;
+      let pending = list.length;
+      list.forEach((issn) => {
+        const req = tx.objectStore("mjl").get(issn);
+        const done = () => { if (--pending === 0) resolve(found); };
+        req.onsuccess = () => {
+          const row = req.result;
+          if (row && row.wosCategory && !found) {
+            if (!row.expires || new Date(row.expires).getTime() > Date.now()) {
+              found = { category: row.wosCategory, index: row.wosIndex || "", issn };
+            }
+          }
+          done();
+        };
+        req.onerror = done;
+      });
+      tx.onerror = () => reject(tx.error || new Error("IndexedDB read failed."));
+    }));
   };
   IdbStore.prototype.getRank = function (issns, year) {
     const self = this;
@@ -749,7 +818,7 @@
         if (out.mjl || i >= list.length) { check(); return; }
         pending++;
         const req = tx.objectStore("mjl").get(list[i]);
-        req.onsuccess = () => { pending--; if (req.result && req.result.wosCategory) out.mjl = req.result.wosCategory; tryMjl(i + 1); };
+        req.onsuccess = () => { pending--; if (req.result && req.result.wosCategory && (!req.result.expires || new Date(req.result.expires).getTime() > Date.now())) out.mjl = req.result.wosCategory; tryMjl(i + 1); };
         req.onerror = () => { pending--; tryMjl(i + 1); };
       };
       tx.onerror = () => reject(tx.error || new Error("IndexedDB read failed."));
@@ -818,14 +887,52 @@
   // year's data came from the store, a fresh download, or is
   // missing — so the user can see the auto-fetch actually worked
   // instead of watching tabs open and close.
-  function sjrOutcomeText(state, year, rows) {
+  // Short plain reason for a failed SJR auto-fetch, from the
+  // worker's detail (the per-candidate "tried" list: kinds like
+  // wrong-year, http-error 403, timeout, html, not-csv). The
+  // panel shows this one short phrase, never the raw URLs.
+  // Returns "" when the detail names no known cause.
+  function sjrBlockReason(detail) {
+    if (!detail) return "";
+    const d = String(detail).toLowerCase();
+    if (d.indexOf("wrong-year") !== -1) return "SJR returned another year's file";
+    if (d.indexOf("http-error 403") !== -1 || d.indexOf("http-error 429") !== -1) return "SJR blocked the download (bot check)";
+    if (d.indexOf("challenge") !== -1) return "SJR asked for a human check that did not clear";
+    if (d.indexOf("timeout") !== -1 || d.indexOf("budget") !== -1) return "SJR download timed out";
+    if (d.indexOf("html") !== -1) return "SJR returned a page, not the file";
+    if (d.indexOf("not-csv") !== -1) return "SJR did not return a CSV file";
+    if (d.indexOf("empty") !== -1) return "SJR returned an empty file";
+    if (d.indexOf("http-error") !== -1 || d.indexOf("error") !== -1) return "SJR download failed";
+    return "";
+  }
+
+  function sjrOutcomeText(state, year, rows, detail) {
     switch (state) {
       case "ready": return "SJR " + year + " already saved";
       case "fetched": return "SJR " + year + " saved" + (rows ? ", " + Number(rows).toLocaleString("en-US") + " rows" : "");
-      case "blocked": case "challenge": case "failed": return "SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page";
+      case "blocked": case "challenge": case "failed": {
+        const reason = detail ? sjrBlockReason(detail) : "";
+        return "SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page" + (reason ? " (" + reason + ")" : "");
+      }
       case "not-released": return "No SJR data for " + year + " yet";
       default: return "";
     }
+  }
+
+  // ---------- Batch resume point (pure, unit-tested) ----------
+  // A batch runs in the side-panel page: if the panel closes or
+  // the browser reloads mid-batch, the in-page loop dies, but
+  // the rows already checked are saved after every row (see
+  // popup.js runBatch). This returns the row index to resume
+  // from, or -1 when there is nothing safe to resume: no saved
+  // state, already finished, or a saved state whose results do
+  // not match its row count (corrupt or from another file).
+  function batchResumePoint(saved) {
+    if (!saved || !Array.isArray(saved.rows) || !Array.isArray(saved.results)) return -1;
+    const next = saved.nextIndex | 0;
+    if (next <= 0 || next >= saved.rows.length) return -1;
+    if (saved.results.length !== next) return -1;
+    return next;
   }
 
   // ---------- Batch not-found breakdown (pure, unit-tested) ----------
@@ -971,7 +1078,8 @@
     MemoryStore: MemoryStore, IdbStore: IdbStore,
     lookupRankSync: lookupRankSync,
     RESULTS_HEADER: RESULTS_HEADER, resultsToCsv: resultsToCsv,
-    sjrOutcomeText: sjrOutcomeText, notFoundBreakdown: notFoundBreakdown,
+    sjrOutcomeText: sjrOutcomeText, sjrBlockReason: sjrBlockReason, notFoundBreakdown: notFoundBreakdown,
+    batchResumePoint: batchResumePoint,
     nextJcrExpiry: nextJcrExpiry,
     sjrExpiresAt: sjrExpiresAt, mjlExpiresAt: mjlExpiresAt,
     expiryMonthLabel: expiryMonthLabel,

@@ -163,38 +163,64 @@
 
   // ---------- SJR (fallback quartile) ----------
 
-  // SJR CSV download on the journal ranking page. The research
-  // notes record two conflicting parameter spellings
-  // (?year=2022&type=j&out=csv and ?year=2023&export=csv), neither
-  // officially documented — so the extension tries out=csv first
-  // and export=csv second. type=j = journals only.
+  // SJR CSV download on the journal ranking page.
   //
-  // ROOT CAUSE, found 27 Nov 2026 (verified live from this VM,
-  // and confirmed by the user's real Chrome failing 4-5 times):
-  // SJR answers automated fetches of journalrank.php with a
-  // Cloudflare "Just a moment..." 403 (both URL spellings).
-  // The first fix opened the SJR HOME page in a background tab
-  // and re-fetched the CSV from the worker with cookies — but
-  // the home page is NOT challenged (HTTP 200, real HTML, from
-  // a datacenter IP), so no clearance was ever earned, and even
-  // a real clearance would not help: Cloudflare's cf_clearance
-  // cookie is Lax, and a Lax cookie is NOT sent on a cross-site
-  // fetch from the worker (chrome-extension:// origin). The
-  // only path that works is to fetch the CSV FROM THE TAB, in
-  // page context (same origin, cookies attached): open the
-  // journalrank.php page itself (the challenged page), poll
-  // until the managed challenge clears, then fetch the CSV
-  // inside the tab — see fetchSjrCsvInTab in background.js.
-  // If the challenge never clears, the panel says so plainly
-  // and offers the one-click manual download instead.
+  // ROOT CAUSE, found 27 Nov 2026 (verified live, twice): the
+  // extension fetched `?year=Y&type=j&out=csv` and
+  // `?year=Y&type=j&export=csv` — but a plain GET of EITHER
+  // returns the HTML ranking page, not a CSV (checked with the
+  // page crawler: both spellings return the rendered table).
+  // The site's own Download button points to
+  // `journalrank.php?year=Y&out=xls`, and THAT URL returns the
+  // full semicolon CSV (verified: the 2023 file, 86,207 lines,
+  // starting with the exact header `Rank;Sourceid;Title;...;
+  // SJR Best Quartile;...`). So `out=xls` is the working
+  // spelling — the in-tab fetch tried two URLs that could never
+  // return a file, the validation correctly rejected the HTML,
+  // and the tab opened and closed with no download. That is the
+  // open-close-without-download the user saw in every batch.
+  // Order: the site's own link first (see findSjrDownloadLinks),
+  // then out=xls, then the two HTML-returning spellings as a
+  // last resort (kept in case the site changes its mind).
   function sjrExportUrl(year) {
-    return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year)) + "&type=j&out=csv";
+    return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year)) + "&out=xls";
   }
   function sjrExportUrlAlt(year) {
-    return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year)) + "&type=j&export=csv";
+    return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year)) + "&out=csv";
+  }
+  function sjrExportUrlDownload(year) {
+    return "https://www.scimagojr.com/journalrank.php?download=csv&year=" + encodeURIComponent(String(year));
   }
   function sjrExportUrls(year) {
-    return [sjrExportUrl(year), sjrExportUrlAlt(year)];
+    return [sjrExportUrl(year), sjrExportUrlAlt(year), sjrExportUrlDownload(year)];
+  }
+
+  // Find the SJR Download link(s) in a ranking page's HTML: the
+  // site's own button, so the extension fetches the URL the site
+  // actually serves instead of guessing a spelling. Matches
+  // anchors whose href asks for an export (out=xls, out=csv,
+  // download=csv) or whose text says Download. Relative hrefs
+  // are resolved against scimagojr.com. Returns absolute URLs,
+  // in page order, deduplicated.
+  function findSjrDownloadLinks(html) {
+    const out = [];
+    if (!html) return out;
+    const re = /<a[^>]*href="([^"]+)"[^>]*>([\s\S]{0,120}?)<\/a>/gi;
+    let m;
+    while ((m = re.exec(String(html))) !== null) {
+      const href = m[1] || "";
+      const label = (m[2] || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+      const isExport = /out=(xls|csv)|download=csv/i.test(href);
+      const isDownloadLabel = /download/i.test(label);
+      if (!isExport && !isDownloadLabel) continue;
+      let url = href;
+      if (url.indexOf("http") !== 0) {
+        url = "https://www.scimagojr.com" + (url.charAt(0) === "/" ? "" : "/") + url;
+      }
+      if (url.indexOf("scimagojr.com/journalrank.php") === -1) continue;
+      if (out.indexOf(url) === -1) out.push(url);
+    }
+    return out;
   }
 
   // Does this downloaded text look like the SJR CSV (sjrdata
@@ -209,6 +235,20 @@
     if (head.trim().startsWith("<")) return false;
     const flat = head.replace(/_/g, " ");
     return flat.indexOf("issn") !== -1 && flat.indexOf("sjr best quartile") !== -1;
+  }
+
+  // The year the SJR export file itself describes, from its
+  // header ("Total Docs. (2025)"). The export has no Year column,
+  // so this header is the only year the file carries — it is the
+  // ground truth the auto-fetch checks a downloaded file against.
+  // Returns the year, or null when the header carries no year
+  // (a synthetic file, or a header the site has changed).
+  function sjrCsvYear(text) {
+    if (!text) return null;
+    const m = String(text).slice(0, 2000).match(/Total Docs\. \((\d{4})\)/);
+    if (!m) return null;
+    const y = parseInt(m[1], 10);
+    return y >= 1999 && y <= 2100 ? y : null;
   }
 
   // Bot / access block: HTTP 403/429/401, or a human-verification
@@ -294,8 +334,11 @@
     sjrLatestYear: sjrLatestYear,
     sjrExportUrl: sjrExportUrl,
     sjrExportUrlAlt: sjrExportUrlAlt,
+    sjrExportUrlDownload: sjrExportUrlDownload,
     sjrExportUrls: sjrExportUrls,
+    findSjrDownloadLinks: findSjrDownloadLinks,
     isSjrCsv: isSjrCsv,
+    sjrCsvYear: sjrCsvYear,
     looksBlocked: looksBlocked,
   };
 

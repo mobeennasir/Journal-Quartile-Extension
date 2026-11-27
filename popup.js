@@ -64,6 +64,8 @@ const sjrFetchBtn = document.getElementById("sjr-fetch");
 const sjrOpenPageBtn = document.getElementById("sjr-open-page");
 const mjlFetchBtn = document.getElementById("mjl-fetch");
 const batchMjlBtn = document.getElementById("batch-mjl");
+const batchStopBtn = document.getElementById("batch-stop");
+const batchResumeBtn = document.getElementById("batch-resume");
 
 // Last article shown, for the "Get WoS category (free)" retry.
 let lastShown = null;
@@ -138,13 +140,29 @@ async function ensureSjrYear(year) {
       return { state: "fetched", year: y, rows: res.rows };
     }
     if (res && (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
-      res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 120000);
+      // Tab budget 180s: tab load <= 20s + challenge poll <= 30s
+      // + in-tab fetch <= 90s = 140s worst case (see
+      // fetchSjrViaTab). The old 120s budget was shorter than
+      // the worst-case flow, so the popup gave up and recorded
+      // "blocked" while the worker was still fetching.
+      res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 180000);
       if (res && res.rows) {
         refreshImportStatus();
         return { state: "fetched", year: y, rows: res.rows };
       }
-      if (res && res.error === "challenge") return { state: "challenge", year: y };
-      return { state: "blocked", year: y };
+      // The message may have timed out while the worker kept
+      // going and stored the file late: re-check the store
+      // before declaring the year blocked. A late store is
+      // still a saved year.
+      try {
+        const meta2 = await getStore().getMeta();
+        if (DATA.sjrFilesCoverYear(meta2, y)) {
+          refreshImportStatus();
+          return { state: "fetched", year: y, rows: meta2.sjrRows };
+        }
+      } catch (err) { /* fall through to blocked */ }
+      if (res && res.error === "challenge") return { state: "challenge", year: y, detail: res.detail || "" };
+      return { state: "blocked", year: y, detail: res && res.detail ? res.detail : "" };
     }
     return { state: "failed", year: y };
   })();
@@ -220,7 +238,8 @@ function escapeHtml(value) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function yearFromCrossref(message) {
@@ -246,12 +265,21 @@ function normaliseCrossref(message) {
   if (message.issue) biblio.push(`Issue ${message.issue}`);
   if (message.page) biblio.push(`pp. ${message.page}`);
   if (message["article-number"]) biblio.push(`Art. ${message["article-number"]}`);
+  // Which date the year came from: an article published online
+  // in Dec 2023 but in a 2024 issue has two years, and the
+  // quartile year must be the print one. When only an online
+  // date exists the year is the online year, and the result
+  // says so ("online first") instead of silently using it.
+  const hasPrint = !!(message["published-print"] && message["published-print"]["date-parts"]);
+  const yearSource = hasPrint ? "print"
+    : (message["published-online"] ? "online" : (message.created ? "created" : ""));
   return {
     title: (message.title && message.title[0]) || "",
     journal: (message["container-title"] && message["container-title"][0]) || "",
     issns: issnListFromCrossref(message),
     issn: issnListFromCrossref(message).map((x) => DATA.formatIssn(x)).join(", "),
     year: yearFromCrossref(message),
+    yearSource: yearSource,
     publisher: message.publisher || "",
     biblio: biblio.join(", "),
     doi: message.DOI || "",
@@ -294,18 +322,30 @@ function normaliseOpenAlex(work) {
 // stated as missing — never another year's rank.
 // sjrNote (from ensureSjrYear): "not-released" or "blocked" —
 // the SJR row then says why, instead of the generic no-data line.
-function rankingRows(data, rank, sjrNote) {
+// sjrDetail is the worker's short failure reason (wrong-year,
+// bot check, timeout, ...): shown in brackets after the blocked
+// line, so a failed auto-fetch names its cause.
+function rankingRows(data, rank, sjrNote, sjrDetail) {
   const year = data.year || "";
   const rows = [];
   const wos = rank && rank.wosCategory ? rank.wosCategory : "";
+  const sjrReason = sjrDetail ? DATA.sjrBlockReason(sjrDetail) : "";
+  // Every value that reaches innerHTML is escaped here, even
+  // though the parsers already constrain quartile/JIF/category:
+  // these rows come from files the user imports (JCR/SJR/MJL),
+  // so a hostile cell must never become live HTML.
+  const q = rank ? escapeHtml(rank.quartile || "") : "";
+  const jif = (rank && rank.jif !== null && rank.jif !== undefined) ? escapeHtml(String(rank.jif)) : "—";
+  const sjr = (rank && rank.sjr !== null && rank.sjr !== undefined) ? escapeHtml(String(rank.sjr)) : null;
+  const wosText = wos ? escapeHtml(wos) + (wos === "W" ? " — SCIE, SSCI or AHCI" : " — ESCI (Emerging)") : "";
   if (rank && rank.source === "JCR") {
-    rows.push(["JCR quartile (" + year + ")", rank.quartile ? "Q" + rank.quartile.replace(/^Q/, "") : "—"]);
-    rows.push(["Impact Factor — JCR (" + year + ")", (rank.jif === null || rank.jif === undefined) ? "—" : String(rank.jif)]);
+    rows.push(["JCR quartile (" + year + ")", q ? "Q" + q.replace(/^Q/, "") : "—"]);
+    rows.push(["Impact Factor — JCR (" + year + ")", jif]);
   } else if (rank && rank.source === "SJR") {
     rows.push(["JCR quartile (" + year + ")", "No JCR data for this year"]);
     rows.push(["Impact Factor — JCR (" + year + ")", "No JCR data for this year"]);
     rows.push(["SJR quartile — fallback, NOT JCR (" + year + ")",
-      rank.quartile + (rank.sjr !== null && rank.sjr !== undefined ? " (SJR " + rank.sjr + ")" : "")]);
+      escapeHtml(rank.quartile || "") + (sjr !== null ? " (SJR " + sjr + ")" : "")]);
     // Per-year store, stated plainly: this year's SJR data is
     // saved in the DB, so the lookup used it with no re-import.
     rows.push(["SJR data", "Saved for " + year]);
@@ -314,10 +354,10 @@ function rankingRows(data, rank, sjrNote) {
     rows.push(["Impact Factor — JCR (" + year + ")", "No JCR data for this year"]);
     rows.push(["SJR quartile — fallback, NOT JCR (" + year + ")",
       sjrNote === "not-released" ? "No SJR data for " + year + " yet"
-      : sjrNote === "blocked" ? "SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page"
+      : sjrNote === "blocked" ? "SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page" + (sjrReason ? " (" + escapeHtml(sjrReason) + ")" : "")
       : "No SJR data for this year"]);
   }
-  rows.push(["WoS category", wos ? wos + (wos === "W" ? " — SCIE, SSCI or AHCI" : " — ESCI (Emerging)") : "Unknown — checking free WoS list…"]);
+  rows.push(["WoS category", wosText || "Unknown — checking free WoS list…"]);
   if (rank && rank.source !== "none" && rank.sourceFile) {
     rows.push(["Ranking data from", escapeHtml(rank.sourceFile)]);
   }
@@ -330,6 +370,7 @@ async function showResult(data, sourceName, opts) {
     ? await safeGetRank(data.issns, parseInt(data.year, 10))
     : null;
   let sjrNote = null;
+  let sjrDetail = "";
   // No SJR row for the article's year? Fetch that year now — the
   // year comes from the article, never from the user. JCR and SJR
   // rows already stored need no fetch at all.
@@ -343,6 +384,7 @@ async function showResult(data, sourceName, opts) {
       }
     } else if (ensured.state === "not-released" || ensured.state === "blocked" || ensured.state === "challenge") {
       sjrNote = ensured.state === "not-released" ? "not-released" : "blocked";
+      sjrDetail = ensured.detail || "";
       if (statusEl) {
         statusEl.textContent = ensured.state === "not-released"
           ? `No SJR data for ${data.year} yet.`
@@ -362,14 +404,14 @@ async function showResult(data, sourceName, opts) {
     ["Title", escapeHtml(data.title || "—")],
     ["Journal", escapeHtml(data.journal || "—")],
     ["ISSN", escapeHtml(data.issn || "—")],
-    ["Year (publication year)", escapeHtml(data.year || "—")],
+    ["Year (publication year)", escapeHtml(data.year || "—") + (data.yearSource === "online" ? " (online first)" : "")],
     ["Publisher", escapeHtml(data.publisher || "—")],
     ["Volume / issue / pages", escapeHtml(data.biblio || "—")],
     ["DOI", data.doi
       ? `<a href="https://doi.org/${encodeURIComponent(data.doi)}" target="_blank" rel="noopener">https://doi.org/${escapeHtml(data.doi)}</a>`
       : "—"],
   ];
-  rankingRows(data, rank, sjrNote).forEach(([k, v]) => rows.push([k, v]));
+  rankingRows(data, rank, sjrNote, sjrDetail).forEach(([k, v]) => rows.push([k, v]));
   const sourceClass = sourceName === "OpenAlex" ? "source openalex" : "source";
   const rankBadge = rank && rank.source === "JCR"
     ? `<span class="source jcr">Ranking: JCR</span>`
@@ -429,10 +471,11 @@ function sendBackgroundMessage(message, timeoutMs) {
   });
 }
 
-async function fetchMjlCategory(issns) {
+async function fetchMjlCategory(issns, journal) {
   // 90s: the rendered-tab fallback (background tab + Angular
-  // render) can take ~30s per journal.
-  return sendBackgroundMessage({ type: "fetchMjlCategory", issns: issns || [] }, 90000);
+  // render) can take ~30s per journal. The journal name goes
+  // along so the worker can store it with the saved row.
+  return sendBackgroundMessage({ type: "fetchMjlCategory", issns: issns || [], journal: journal || "" }, 90000);
 }
 
 function wosCategoryText(category) {
@@ -445,18 +488,12 @@ async function updateWosCategory(data, rank) {
   if (rank && rank.wosCategory) return; // already known from JCR / MJL import
   const dd = wosDdEl();
   if (dd) dd.textContent = "Checking free WoS list…";
-  const res = await fetchMjlCategory(data.issns);
+  const res = await fetchMjlCategory(data.issns, data.journal);
   const ddNow = wosDdEl();
   if (res && res.category) {
-    // Store it, so the next lookup for this journal is instant.
-    try {
-      const rows = data.issns.map((issn) => ({
-        issn, journal: data.journal || "", year: null, quartile: "",
-        jif: null, wosIndex: res.index || "", wosCategory: res.category,
-        category: "", sourceFile: "Master Journal List (automatic)", editionYear: null,
-      }));
-      await getStore().putMjl(rows, { fileName: "Master Journal List (automatic)", rows: rows.length, importedAt: new Date().toISOString(), expires: DATA.mjlExpiresAt(new Date().toISOString()) });
-    } catch (err) { /* storage failure: the displayed value still stands */ }
+    // Saved by the worker as it fetched (the single save point),
+    // so the next lookup for this journal reads it from the
+    // store with no tab opened.
     if (ddNow) ddNow.textContent = wosCategoryText(res.category);
     if (lastShown && lastShown.data === data) lastShown.rank.wosCategory = res.category;
     refreshImportStatus();
@@ -534,16 +571,8 @@ async function fetchArticleByDoi(doi) {
 }
 
 // How much of the wanted title appears in the candidate title
-// (word overlap, ignoring short words). Guards the title search
-// against returning a different article with a similar title.
-function titleOverlap(wanted, candidate) {
-  const words = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 3);
-  const want = words(wanted);
-  if (!want.length) return 0;
-  const cand = new Set(words(candidate));
-  const hits = want.filter((w) => cand.has(w)).length;
-  return hits / want.length;
-}
+// lives in shared.js (titleOverlap, Unicode-aware) so the Node
+// tests can check it directly; the lookup page uses that copy.
 
 // Find an article by title (+ journal + year when known).
 // Returns { data, sourceName, resolvedBy } on success, or
@@ -565,7 +594,10 @@ async function fetchArticleByTitle(title, journal, year) {
   // Crossref title search.
   try {
     const params = new URLSearchParams();
-    params.set("query.bibliographic", title);
+    // A pasted title can be very long; a GET URL over ~8 KB is
+    // refused by some servers, so the search uses the first
+    // 200 characters, which is where the match lives.
+    params.set("query.bibliographic", String(title).slice(0, 200));
     if (journal) params.set("query.container-title", journal);
     if (year) params.set("filter", `from-pub-date:${year}-01-01,until-pub-date:${year}-12-31`);
     params.set("rows", "3");
@@ -586,7 +618,7 @@ async function fetchArticleByTitle(title, journal, year) {
   // OpenAlex title search.
   try {
     const params = new URLSearchParams();
-    params.set("search", title);
+    params.set("search", String(title).slice(0, 200));
     if (year) params.set("filter", `publication_year:${year}`);
     params.set("per-page", "3");
     params.set("mailto", MAILTO);
@@ -681,6 +713,14 @@ async function onLookupManualClick() {
   }
   if (!title || !journal || !year) {
     showError("Enter the title, journal and year. All three are needed.");
+    return;
+  }
+  // A year outside any plausible range is a typo (e.g. 2100, or
+  // 99), not a publication year — say so instead of searching
+  // Crossref for a year that cannot exist.
+  const thisYear = new Date().getFullYear();
+  if (year < 1800 || year > thisYear + 1) {
+    showError(`That year (${year}) looks wrong — check it and try again.`);
     return;
   }
   setLoading(true, `Searching Crossref for “${title.slice(0, 60)}…” …`);
@@ -1160,22 +1200,37 @@ if (sjrFetchBtn) {
       }
       if (res && (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
         sjrStatusEl.textContent = "Direct download blocked. Trying the download in your browser…";
-        res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year }, 120000);
+        res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year }, 180000);
         if (res && res.rows) {
           sjrStatusEl.textContent = `SJR data: ${res.rows} rows for ${year}, saved from the browser download. ${DATA.validUntilText(new Date().toISOString(), "sjr")}.`;
           sjrStatusEl.classList.remove("error");
           refreshImportStatus();
           return;
         }
+        // The message may have timed out while the worker kept
+        // going and stored the file late: re-check the store
+        // before reporting a failure.
+        try {
+          const meta2 = await getStore().getMeta();
+          if (DATA.sjrFilesCoverYear(meta2, year)) {
+            const file2 = meta2.sjrFiles.find((f) => DATA.sjrFileYear(f) === year);
+            sjrStatusEl.textContent = `SJR data: ${meta2.sjrRows} rows for ${year}, saved from the browser download. ${DATA.validUntilText(file2.importedAt, "sjr")}.`;
+            sjrStatusEl.classList.remove("error");
+            refreshImportStatus();
+            return;
+          }
+        } catch (err) { /* fall through to the failure message */ }
       }
       // Every failure now names its real reason and the one
       // working next step: open the SJR download page, download
       // the CSV for this year, then use Import SJR file below.
       // "challenge" = the human check never cleared in the tab;
-      // anything else = the CSV fetch itself was still blocked.
+      // anything else = the CSV fetch itself failed, and the
+      // worker's detail says why (wrong year, timeout, ...).
+      const failReason = res && res.detail ? DATA.sjrBlockReason(res.detail) : "";
       sjrStatusEl.textContent = res && res.error === "challenge"
         ? `SJR asked for a human check that did not clear. Tap “Open SJR download page”, download the CSV for ${year}, then use Import SJR file below.`
-        : `SJR blocked the download (bot check). Tap “Open SJR download page”, download the CSV for ${year}, then use Import SJR file below.`;
+        : `${failReason ? failReason + ". " : "SJR blocked the download (bot check). "}Tap “Open SJR download page”, download the CSV for ${year}, then use Import SJR file below.`;
       sjrStatusEl.classList.add("error");
       refreshImportStatus();
     } finally {
@@ -1232,6 +1287,71 @@ clearDataBtn.addEventListener("click", async () => {
   }
 });
 
+// ---------- Batch progress: saved after every row, resumable ----------
+// A batch runs in the side-panel page: if the panel closes, the
+// tab reloads, or the browser restarts mid-batch, the in-page
+// loop dies. The rows already checked are saved to
+// chrome.storage.local after every row, so the panel can offer
+// to resume from the exact row it stopped at instead of starting
+// over. The saved state is validated by DATA.batchResumePoint
+// (rows + results must agree), and cleared when the batch
+// finishes. Batch data never lives only in a global.
+function saveBatchState(rows, results, nextIndex) {
+  if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+  try {
+    chrome.storage.local.set({ batchState: { rows: rows, results: results, nextIndex: nextIndex, savedAt: new Date().toISOString() } });
+  } catch (err) { /* storage unavailable: the batch still runs, resume just will not be offered */ }
+}
+function clearBatchState() {
+  if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+  try { chrome.storage.local.remove("batchState"); } catch (err) { /* ignore */ }
+}
+
+// Set by the user tapping "Stop batch": the loop finishes the
+// row it is on, then stops. Partial results are real results,
+// so the download is shown, labelled partial in the status.
+let batchStopRequested = false;
+let pendingBatchState = null;
+
+function offerBatchResume(saved) {
+  const next = DATA.batchResumePoint(saved);
+  if (next < 0) return false;
+  pendingBatchState = saved;
+  batchFileRows = saved.rows;
+  if (batchFileNameEl) batchFileNameEl.textContent = "Saved batch: " + saved.rows.length + " articles.";
+  batchRunBtn.disabled = false;
+  batchStatusEl.textContent = `Batch stopped at ${next} of ${saved.rows.length} articles. Resume to continue from where it stopped.`;
+  if (batchResumeBtn) batchResumeBtn.hidden = false;
+  return true;
+}
+if (batchResumeBtn) {
+  batchResumeBtn.addEventListener("click", async () => {
+    const saved = pendingBatchState;
+    if (!saved) return;
+    const next = DATA.batchResumePoint(saved);
+    if (next < 0) return;
+    batchResumeBtn.hidden = true;
+    pendingBatchState = null;
+    batchStatusEl.textContent = `Resuming batch at article ${next + 1} of ${saved.rows.length}…`;
+    await runBatch(saved.rows, { startIndex: next, existingResults: saved.results });
+  });
+}
+if (batchStopBtn) {
+  batchStopBtn.addEventListener("click", () => {
+    batchStopRequested = true;
+    batchStopBtn.disabled = true;
+    batchStopBtn.textContent = "Stopping…";
+  });
+}
+// Offer a resume when the panel opens with an unfinished batch
+// saved (panel closed mid-batch, or browser restarted).
+if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+  chrome.storage.local.get("batchState", (result) => {
+    const saved = result && result.batchState;
+    if (saved) offerBatchResume(saved);
+  });
+}
+
 // ---------- Batch: upload a list of articles ----------
 let batchResults = [];
 let batchFileRows = null;
@@ -1241,6 +1361,10 @@ batchFileEl.addEventListener("change", async () => {
   batchFileNameEl.textContent = file ? file.name : "No file chosen.";
   batchRunBtn.disabled = !file;
   batchFileRows = null;
+  // A new file replaces any saved batch: no stale resume offer.
+  clearBatchState();
+  pendingBatchState = null;
+  if (batchResumeBtn) batchResumeBtn.hidden = true;
   if (!file) return;
   const typeError = wrongTypeMessage(file, ARTICLE_FILE_TYPES, "the article list");
   if (typeError) {
@@ -1298,12 +1422,21 @@ function batchRowToResult(row, found, rank, note, sjrState) {
 function updateBatchSjrStatus(outcomes) {
   if (!batchSjrStatusEl) return;
   const lines = [...outcomes.entries()].sort((a, b) => a[0] - b[0])
-    .map(([year, o]) => DATA.sjrOutcomeText(o.state, year, o.rows)).filter(Boolean);
+    .map(([year, o]) => DATA.sjrOutcomeText(o.state, year, o.rows, o.detail)).filter(Boolean);
   batchSjrStatusEl.textContent = lines.length ? "SJR: " + lines.join("; ") + "." : "";
 }
 
-async function runBatch(rows) {
-  batchResults = [];
+async function runBatch(rows, opts) {
+  const startIndex = (opts && opts.startIndex) | 0;
+  const resuming = startIndex > 0 && opts && Array.isArray(opts.existingResults);
+  batchResults = resuming ? opts.existingResults.slice() : [];
+  // A fresh run discards any saved state from an earlier batch;
+  // a resume keeps it until this run finishes or stops again.
+  if (!resuming) clearBatchState();
+  pendingBatchState = null;
+  if (batchResumeBtn) batchResumeBtn.hidden = true;
+  batchStopRequested = false;
+  if (batchStopBtn) { batchStopBtn.hidden = false; batchStopBtn.disabled = false; batchStopBtn.textContent = "Stop batch"; }
   // No per-row table in the panel: during a batch the panel shows
   // only the status line and progress bar. The results section
   // (download button) stays hidden until the whole file finishes.
@@ -1319,11 +1452,18 @@ async function runBatch(rows) {
   batchTestsetBtn.disabled = true;
   let resolvedDoi = 0, found = 0;
   const seenDois = new Map(); // DOI -> first row number (Scholar lists some works twice)
+  // On resume, rebuild the duplicate map from the rows already
+  // checked, so a resumed row is not counted as new.
+  if (resuming) batchResults.forEach((r, idx) => {
+    const k = (r.doi || "").toLowerCase();
+    if (k && !seenDois.has(k)) seenDois.set(k, idx + 1);
+  });
   const sjrYearsFetched = new Set(); // publication years whose SJR data was fetched during this run
   const sjrYearOutcomes = new Map(); // year -> ensureSjrYear outcome (one attempt per distinct year)
   let finished = false;
+  let stopped = false;
   try {
-  for (let i = 0; i < rows.length; i++) {
+  for (let i = startIndex; i < rows.length; i++) {
     const row = rows[i];
     batchStatusEl.textContent = `Checking article ${i + 1} of ${rows.length}: ${row.title.slice(0, 60)}…`;
     batchProgressBarEl.style.width = Math.round((i / rows.length) * 100) + "%";
@@ -1414,10 +1554,17 @@ async function runBatch(rows) {
       result.notFoundKind = "network";
     }
     batchResults.push(result);
+    // Persist after every row: if the panel closes, the tab
+    // reloads, or the browser restarts, the rows already checked
+    // survive in chrome.storage.local and the batch can resume
+    // from the next row instead of starting over.
+    saveBatchState(rows, batchResults, i + 1);
     // No table row: the panel just counts — "12 of 65 articles
     // done" — and the per-row results live only in the CSV.
     batchStatusEl.textContent = `${i + 1} of ${rows.length} articles done`;
     await sleep(500); // polite pacing for the Crossref polite pool
+    // Stop finishes the row it is on, then stops here.
+    if (batchStopRequested) { stopped = true; break; }
   }
     finished = true;
   } finally {
@@ -1430,6 +1577,24 @@ async function runBatch(rows) {
     batchStatusEl.textContent = "Batch stopped early — results are incomplete, download is hidden.";
     return;
   }
+  if (stopped) {
+    // Stopped by the user: partial results are real results, so
+    // the download is shown, and the saved state offers resume
+    // from the next row. The state stays saved until the batch
+    // finishes or a new file replaces it.
+    if (batchStopBtn) batchStopBtn.hidden = true;
+    batchResultsEl.hidden = false;
+    batchDownloadBtn.hidden = false;
+    if (batchMjlBtn) batchMjlBtn.hidden = false;
+    batchProgressBarEl.style.width = Math.round((batchResults.length / rows.length) * 100) + "%";
+    batchStatusEl.textContent = `Batch stopped at ${batchResults.length} of ${rows.length} articles — results are partial. Resume to continue from where it stopped.`;
+    pendingBatchState = { rows: rows, results: batchResults.slice(), nextIndex: batchResults.length, savedAt: new Date().toISOString() };
+    if (batchResumeBtn) batchResumeBtn.hidden = false;
+    return;
+  }
+  // Finished: no resume state to keep.
+  clearBatchState();
+  if (batchStopBtn) batchStopBtn.hidden = true;
   // Only now, with every row done, is the download shown.
   batchResultsEl.hidden = false;
   batchDownloadBtn.hidden = false;
@@ -1506,32 +1671,26 @@ if (batchMjlBtn) {
   batchMjlBtn.addEventListener("click", async () => {
     if (!batchResults.length) return;
     batchMjlBtn.disabled = true;
-    let checked = 0, found = 0;
+    let checked = 0, found = 0, saved = 0;
     try {
       for (let i = 0; i < batchResults.length; i++) {
         const r = batchResults[i];
         if (!r.issns || !r.issns.length || (r.rank && r.rank.wosCategory)) continue;
-        const res = await fetchMjlCategory(r.issns);
+        const res = await fetchMjlCategory(r.issns, r.journal);
         checked++;
         if (res && res.category) {
           found++;
+          if (res.stored) saved++;
           r.rank = r.rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
           r.rank.wosCategory = res.category;
-          try {
-            const importedAt = new Date().toISOString();
-            const rows = r.issns.map((issn) => ({
-              issn, journal: r.journal || "", year: null, quartile: "",
-              jif: null, wosIndex: res.index || "", wosCategory: res.category,
-              category: "", sourceFile: "Master Journal List (automatic)", editionYear: null,
-            }));
-            await getStore().putMjl(rows, { fileName: "Master Journal List (automatic)", rows: rows.length, importedAt, expires: DATA.mjlExpiresAt(importedAt) });
-          } catch (err) { /* the displayed value still stands */ }
+          // Saved by the worker as it fetched (the single save
+          // point) — no panel-side save here any more.
           // No panel table any more: the enriched category lives
           // in the downloaded CSV, not in a row on screen.
         }
         await sleep(300); // polite pacing for the MJL search
       }
-      batchStatusEl.textContent = `WoS categories: ${found} found of ${checked} checked.`;
+      batchStatusEl.textContent = `WoS categories: ${found} found of ${checked} checked${found ? `, ${saved} saved.` : "."}`;
     } finally {
       batchMjlBtn.disabled = false;
       refreshImportStatus();

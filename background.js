@@ -113,16 +113,24 @@ function autoStatusSave(patch) {
   });
 }
 
-// SJR CSV for one year: try out=csv, then export=csv. Cookies
-// are included, so a Cloudflare clearance cookie earned by a
-// real browser tab (see fetchSjrViaTab) is sent with the fetch.
+// SJR CSV for one year: the site's own export URLs, out=xls
+// first (see freedata.js — out=csv and export=csv return the
+// HTML ranking page, not a file). Cookies are included, so a
+// Cloudflare clearance cookie earned by a real browser tab
+// (see fetchSjrViaTab) is sent with the fetch.
+//
+// Fail fast: a Cloudflare 403 arrives in under a second, so a
+// 15s timeout per URL is plenty. The old 60s timeout let three
+// hanging URLs eat 180s — more than the popup's 90s budget for
+// this call — so the popup gave up with "failed" before the tab
+// path was ever tried.
 async function fetchSjrYear(year) {
-  const urls = [FREE.sjrExportUrl(year), FREE.sjrExportUrlAlt(year)];
+  const urls = FREE.sjrExportUrls(year);
   let lastBlocked = false;
   for (const url of urls) {
     let res;
     try {
-      res = await fetchTextTimeout(url, 60000, "text/csv, */*", "include");
+      res = await fetchTextTimeout(url, 15000, "text/csv, */*", "include");
     } catch (err) {
       continue; // network/timeout: try the alternate spelling
     }
@@ -137,6 +145,17 @@ async function fetchSjrYear(year) {
 }
 
 async function importSjrText(text, year) {
+  // Year guard: the file's own header says which year it
+  // describes. A file for another year must never be stored
+  // under this year — parseSjrText takes the requested year
+  // first, so without this check a wrong-year file would
+  // silently become this year's data (the bug found 27 Nov
+  // 2026: the site's year-less Download link returns the latest
+  // year's file for every year requested).
+  const fileYear = FREE.sjrCsvYear(text);
+  if (fileYear && fileYear !== year) {
+    return { rows: 0, skipped: 0, warnings: ["File is for " + fileYear + ", not " + year], wrongYear: fileYear };
+  }
   const parsed = FDATA.parseSjrText(text, { fileName: "SJR " + year + " (auto-fetch)", year });
   if (!parsed.rows.length) return { rows: 0, skipped: parsed.skipped, warnings: parsed.warnings };
   const store = new FDATA.IdbStore();
@@ -353,6 +372,15 @@ const mjlCategoryCache = new Map();
 function sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 async function waitForTabLoad(tabId, timeoutMs) {
+  // Race fix: the tab may already be "complete" before this
+  // listener attaches (fast load, or a reload that finished
+  // while the previous step awaited). Without this check the
+  // wait runs the FULL timeout for a tab that already loaded —
+  // up to 20s wasted per SJR year.
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab && tab.status === "complete") return true;
+  } catch (err) { /* fall through to the listener */ }
   return new Promise((resolve) => {
     let done = false;
     const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, timeoutMs || 30000);
@@ -414,10 +442,22 @@ async function fetchMjlCategoryViaTab(issns) {
   return { error: sawBlocked ? "blocked" : (sawUnreadable ? "unreadable" : "network") };
 }
 
-async function fetchMjlCategory(issns) {
+async function fetchMjlCategory(issns, journal) {
   const list = (issns || []).filter(Boolean);
   const cacheKey = list.join(",");
   if (cacheKey && mjlCategoryCache.has(cacheKey)) return mjlCategoryCache.get(cacheKey);
+  // 0. Store first: a journal fetched before — by a single
+  // lookup, a batch, or the retry button — is answered from
+  // IndexedDB with no tab opened and no MJL page read. This is
+  // what makes the next lookup instant.
+  try {
+    const stored = await new FDATA.IdbStore().getMjl(list);
+    if (stored) {
+      const hit = { category: stored.category, index: stored.index, issn: stored.issn, stored: true };
+      if (cacheKey) mjlCategoryCache.set(cacheKey, hit);
+      return hit;
+    }
+  } catch (err) { /* fall through to the live check */ }
   let result = null;
   let sawUnreadable = false;
   for (const issn of list) {
@@ -452,97 +492,328 @@ async function fetchMjlCategory(issns) {
       result = { error: sawUnreadable ? "unreadable" : "network" };
     }
   }
+  // Save every successful category result HERE, in the worker:
+  // the single save point for every caller (single lookup,
+  // batch button, retry). The bug the user saw — all Naqqash
+  // articles fetched their category, only the 6 he checked
+  // manually were in the store — was the save living in the
+  // panel, where a failed write was silently swallowed and a
+  // caller could show the category without ever storing it.
+  // Rows are stamped with import date + 12-month expiry, and
+  // deduped by ISSN (the mjl store is keyed by ISSN, so a
+  // re-fetch overwrites instead of duplicating).
+  if (result && result.category) {
+    try {
+      await saveMjlCategory(result, list, journal);
+      result.stored = true;
+    } catch (err) { result.stored = false; }
+  }
   if (cacheKey) mjlCategoryCache.set(cacheKey, result);
   return result;
+}
+
+// One auto-saved WoS list entry per journal: rows under every
+// ISSN of that journal (print + online), so a later lookup by
+// either ISSN hits the store.
+async function saveMjlCategory(result, issns, journal) {
+  const importedAt = new Date().toISOString();
+  const expires = FDATA.mjlExpiresAt(importedAt);
+  const rows = (issns || []).filter(Boolean).map((issn) => ({
+    issn, journal: journal || "", year: null, quartile: "",
+    jif: null, wosIndex: result.index || "", wosCategory: result.category,
+    category: "", sourceFile: "Master Journal List (automatic)", editionYear: null,
+    importedAt, expires,
+  }));
+  if (!rows.length) return;
+  await new FDATA.IdbStore().putMjl(rows, { fileName: "Master Journal List (automatic)", rows: rows.length, importedAt, expires });
 }
 
 // Fetch the SJR CSV FROM INSIDE a tab on scimagojr.com.
 // Same origin as the page, so the Cloudflare clearance cookie
 // earned by the tab is sent with the request — a cross-origin
-// fetch from the worker cannot send it (Lax cookie). Tries both
-// export URL spellings and validates the result is really the
-// SJR CSV, not a challenge page. ONE executeScript call, func
-// only, fully self-contained (same rule as checkThisPage: no
-// cross-call persistence to fail). Returns { text } or { error }.
+// fetch from the worker cannot send it (Lax cookie).
+//
+// ROOT CAUSE of the open-close-without-download (27 Nov 2026):
+// the old version fetched `?type=j&out=csv` and `?type=j&
+// export=csv` — but a plain GET of either returns the HTML
+// ranking page, not a CSV (verified live), so the validation
+// correctly rejected the HTML twice and the tab closed with no
+// data. The fix then was to read the site's OWN Download link
+// from the rendered page first, then the known export spellings.
+//
+// SECOND ROOT CAUSE, found 27 Nov 2026 from the user's report
+// ("after i downloaded one file manually the cloudflare was
+// resolved for all the pages it opened in background, the
+// captcha never came even in the background tab, not even once,
+// still it did not worked"): the challenge was never the
+// blocker. The old code returned the whole ~11 MB CSV as ONE
+// executeScript result. That is the one step that differs from
+// the manual import, which works (FileReader in the panel, no
+// executeScript), and MV3 guidance says to keep executeScript
+// results small and to stream many-megabyte payloads in chunks
+// instead. So the CSV is now fetched in the tab, stored on the
+// tab's window, and read back in 512 KB slices — every
+// executeScript result stays small. A single-return fetch is
+// kept as a fallback for a tab whose window did not keep the
+// text between calls.
+//
+// THIRD BUG found the same day, proven against the live site
+// and the real 2025 file: the site's own Download link is
+// `journalrank.php?out=xls` with NO year parameter — it exports
+// the site's default (latest) year. The old code tried it
+// FIRST, so a 2020 request got the 2025 file, which passed
+// validation and was stored AS 2020 (the parser takes the
+// requested year first). Now the site's link is used only when
+// it carries the requested year, and every CSV is checked
+// against its own header year ("Total Docs. (YYYY)") before
+// it is accepted — a wrong-year file is reported as
+// "wrong-year", never stored.
+//
+// Every attempt reports what it got (csv / html / http-error /
+// timeout / wrong-year), so a failure names its cause instead
+// of a bare "blocked". Returns { text } or { error, detail }.
+
+// The function injected into the SJR ranking tab. Self-contained:
+// it only uses its arguments, document, fetch, and window. It
+// fetches the CSV for the requested year, checks the file's own
+// header year, and either stores the text on the tab's window
+// (mode "store", returning only a small ack) or returns the
+// text (mode "return", the fallback). The site's own Download
+// link is used only when it carries the requested year.
+async function sjrInTabFetch(urls, year, mode, budgetMs) {
+  const tried = [];
+  // 1. Candidates: the year-specific export URLs first. The
+  // site's own Download link only when it carries this year.
+  const candidates = [];
+  try {
+    const anchors = Array.from(document.querySelectorAll("a[href]"));
+    for (const a of anchors) {
+      const href = a.getAttribute("href") || "";
+      const label = (a.textContent || "").trim();
+      if (/out=(xls|csv)|download=csv/i.test(href) || /download/i.test(label)) {
+        try {
+          const abs = new URL(href, document.baseURI).toString();
+          if (abs.indexOf("scimagojr.com/journalrank.php") === -1) continue;
+          // The live link is `journalrank.php?out=xls` with no
+          // year: it exports the site's default (latest) year.
+          // For any other year it is the wrong file, so it is
+          // skipped unless it asks for this year itself.
+          if (new URL(abs).searchParams.get("year") !== String(year)) continue;
+          if (candidates.indexOf(abs) === -1) candidates.push(abs);
+        } catch (e) { /* bad href: skip */ }
+      }
+    }
+  } catch (e) { /* DOM read failed: fall through to the list */ }
+  for (const url of urls) {
+    if (candidates.indexOf(url) === -1) candidates.push(url);
+  }
+  // 2. Fetch each candidate until one returns the real CSV for
+  // this year. Total budget ~90s for the whole loop: the first
+  // candidate gets up to 60s (the server generates an ~11 MB
+  // file, which is slow), the alternates share what is left.
+  // Without a deadline this loop could run past the popup's
+  // message budget, so the popup gave up and recorded "blocked"
+  // while the worker was still fetching.
+  const deadline = Date.now() + (budgetMs || 90000);
+  for (const url of candidates) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 5000) { tried.push({ url, status: 0, kind: "budget" }); break; }
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.min(60000, remaining));
+      let res;
+      try {
+        res = await fetch(url, { credentials: "include", signal: controller.signal, headers: { Accept: "text/csv, */*" } });
+      } finally { clearTimeout(timer); }
+      if (!res.ok) { tried.push({ url, status: res.status, kind: "http-error" }); continue; }
+      const text = await res.text();
+      if (!text) { tried.push({ url, status: res.status, kind: "empty" }); continue; }
+      if (text.trim().startsWith("<")) { tried.push({ url, status: res.status, kind: "html" }); continue; }
+      const head = text.slice(0, 2000).toLowerCase().replace(/_/g, " ");
+      if (head.indexOf("issn") === -1 || head.indexOf("sjr best quartile") === -1) {
+        tried.push({ url, status: res.status, kind: "not-csv" });
+        continue;
+      }
+      // The file's own header year is the ground truth: a file
+      // for another year is never accepted for this year.
+      const m = text.slice(0, 2000).match(/Total Docs\. \((\d{4})\)/);
+      const headerYear = m ? parseInt(m[1], 10) : null;
+      if (headerYear && headerYear !== year) {
+        tried.push({ url, status: res.status, kind: "wrong-year" });
+        continue;
+      }
+      if (mode === "store") {
+        window.__sjrCsv = text;
+        return { ok: true, length: text.length, year: headerYear || year, tried };
+      }
+      return { ok: true, text, tried };
+    } catch (e) {
+      tried.push({ url, status: 0, kind: e && e.name === "AbortError" ? "timeout" : "error" });
+    }
+  }
+  return { ok: false, tried };
+}
+
+function sjrTriedSummary(tried) {
+  return (tried || []).map((t) => t.kind + (t.status ? " " + t.status : "") + " (" + t.url + ")").join("; ");
+}
+
 async function fetchSjrCsvInTab(tabId, year) {
+  const urls = FREE.sjrExportUrls(year);
+  let stored;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: sjrInTabFetch,
+      args: [urls, year, "store", 90000],
+    });
+    stored = results && results[0] ? results[0].result : null;
+  } catch (err) {
+    return { error: "blocked", detail: "in-tab fetch failed: " + String(err && err.message || err) };
+  }
+  if (!stored || !stored.ok) {
+    const summary = sjrTriedSummary(stored && stored.tried);
+    return { error: "blocked", detail: summary ? "no candidate returned the CSV: " + summary : "in-tab fetch failed" };
+  }
+  // Read the stored text back in small slices: each
+  // executeScript result is at most 512 KB, never the whole
+  // ~11 MB file in one result.
+  const CHUNK = 512 * 1024;
+  let text = "";
+  for (let start = 0; start < stored.length; start += CHUNK) {
+    let slice = "";
+    try {
+      const r = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: (s, l) => (window.__sjrCsv || "").slice(s, s + l),
+        args: [start, CHUNK],
+      });
+      slice = r && r[0] ? String(r[0].result || "") : "";
+    } catch (err) { slice = ""; }
+    if (!slice) {
+      // The tab did not keep the text between calls: fall back
+      // to the single-return fetch (old path).
+      return fetchSjrCsvInTabSingle(tabId, year);
+    }
+    text += slice;
+  }
+  if (text.length !== stored.length) return fetchSjrCsvInTabSingle(tabId, year);
+  const headerYear = FREE.sjrCsvYear(text);
+  if (headerYear && headerYear !== year) {
+    return { error: "blocked", detail: "wrong-year: SJR returned the " + headerYear + " file for a " + year + " request" };
+  }
+  return { text };
+}
+
+// Fallback: the old single-return in-tab fetch. Same candidates
+// and validation, but the whole CSV comes back in one
+// executeScript result. Used only when the chunked read above
+// could not read the stored text back.
+async function fetchSjrCsvInTabSingle(tabId, year) {
   const urls = FREE.sjrExportUrls(year);
   let results;
   try {
     results = await chrome.scripting.executeScript({
       target: { tabId },
-      func: async (urls) => {
-        for (const url of urls) {
-          try {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), 15000);
-            let res;
-            try {
-              res = await fetch(url, { credentials: "include", signal: controller.signal, headers: { Accept: "text/csv, */*" } });
-            } finally { clearTimeout(timer); }
-            if (!res.ok) continue;
-            const text = await res.text();
-            if (!text || text.trim().startsWith("<")) continue;
-            const head = text.slice(0, 2000).toLowerCase().replace(/_/g, " ");
-            if (head.indexOf("issn") !== -1 && head.indexOf("sjr best quartile") !== -1) {
-              return { ok: true, text };
-            }
-          } catch (e) { /* try the next spelling */ }
-        }
-        return { ok: false };
-      },
-      args: [urls],
+      func: sjrInTabFetch,
+      args: [urls, year, "return", 60000],
     });
   } catch (err) {
-    return { error: "blocked" };
+    return { error: "blocked", detail: "in-tab fetch failed: " + String(err && err.message || err) };
   }
   const first = results && results[0];
-  if (!first || first.error) return { error: "blocked" };
-  if (first.result && first.result.ok) return { text: first.result.text };
-  return { error: "blocked" };
+  if (!first || first.error) return { error: "blocked", detail: "in-tab fetch failed" };
+  if (first.result && first.result.ok && typeof first.result.text === "string" && first.result.text) {
+    return { text: first.result.text };
+  }
+  const summary = sjrTriedSummary(first.result && first.result.tried);
+  return { error: "blocked", detail: summary ? "no candidate returned the CSV: " + summary : "in-tab fetch failed" };
 }
 
 // One-click download + import (fallback when the background
 // fetch is blocked): open the SJR journal ranking page itself
-// in a background tab in the USER's browser — that is the page
-// Cloudflare actually challenges (the home page is not, so
-// opening it earned no clearance: the old bug) — poll until
-// the managed challenge clears, then fetch the CSV FROM THE
-// TAB (fetchSjrCsvInTab, same origin, cookies attached) and
-// import it. The tab is always closed afterwards, and no file
-// is downloaded into the user's Downloads folder. The imported
+// in a tab in the USER's browser — that is the page Cloudflare
+// actually challenges (the home page is not, so opening it
+// earned no clearance: the old bug) — poll until the managed
+// challenge clears, then fetch the CSV FROM THE TAB
+// (fetchSjrCsvInTab, same origin, cookies attached) and import
+// it. The tab is always closed afterwards, and no file is
+// downloaded into the user's Downloads folder. The imported
 // data is stored until expiry like every other import.
 // Returns { rows, year, via } or { error, year } where error
 // is "challenge" (the human check never cleared), "blocked"
 // (the in-tab CSV fetch still got no CSV), or "failed".
+//
+// The tab is opened ACTIVE (visible), not in the background:
+// that is the fix for the open-close-without-download the user
+// saw in every batch. The page loads fine in his visible
+// browser, but a hidden background tab is throttled and
+// Cloudflare's managed challenge does not reliably run/clear
+// there — the old version polled a background tab for up to
+// 40s, never saw the challenge clear, and closed with no data.
+// A visible tab flashes open once per distinct year (never per
+// article) and closes as soon as the CSV is fetched.
+//
+// Timing budget, so the popup's message timeout is never the
+// thing that kills a working fetch (the old bug #2): tab load
+// <= 20s + challenge poll <= 30s + in-tab fetch <= 90s = 140s
+// worst case, inside the popup's 180s budget for this call.
+// (Only the rare single-return fallback can add up to 60s more;
+// the popup then times out, but the worker keeps going, stores
+// the file, and the popup recovers it by re-checking the store.)
+// The outcome is also written to chrome.storage.local, so a
+// popup that timed out anyway can recover it by re-checking
+// the store (see ensureSjrYear in popup.js).
 async function fetchSjrViaTab(year) {
   let tabId = null;
+  let outcome = null;
   try {
-    const tab = await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false });
+    const tab = await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true });
     tabId = tab.id;
     await waitForTabLoad(tabId, 20000);
     // Poll until the challenge clears (a managed challenge
-    // auto-solves in a real browser) — up to ~40s. The old
-    // version waited a fixed 6s and never checked at all.
+    // auto-solves in a real browser) — up to ~30s.
     let cleared = false;
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 15; i++) {
       let text = "";
       try { text = await readTabText(tabId); } catch (err) { break; }
       if (text && text.length > 500 && !FREE.isChallengeText(text)) { cleared = true; break; }
       await sleepMs(2000);
     }
-    if (!cleared) return { error: "challenge", year };
+    if (!cleared) { outcome = { error: "challenge", year }; return outcome; }
     const fetched = await fetchSjrCsvInTab(tabId, year);
-    if (fetched.error) return { error: fetched.error, year };
+    if (fetched.error) { outcome = { error: fetched.error, year, detail: fetched.detail || "" }; return outcome; }
     const done = await importSjrText(fetched.text, year);
-    if (!done.rows) return { error: "not-csv", year };
-    return { rows: done.rows, skipped: done.skipped, year, via: "browser-tab" };
+    if (!done.rows) {
+      outcome = { error: "not-csv", year, detail: done.wrongYear
+        ? "wrong-year: SJR returned the " + done.wrongYear + " file for a " + year + " request"
+        : "downloaded text parsed to 0 rows (" + done.skipped + " skipped)" };
+      return outcome;
+    }
+    outcome = { rows: done.rows, skipped: done.skipped, year, via: "browser-tab" };
+    return outcome;
   } catch (err) {
-    return { error: "failed", year, detail: String(err && err.message || err) };
+    outcome = { error: "failed", year, detail: String(err && err.message || err) };
+    return outcome;
   } finally {
+    if (outcome) recordSjrTabFetch(outcome);
     if (tabId !== null && chrome.tabs && chrome.tabs.remove) {
       try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ }
     }
   }
+}
+
+// Outcome of the last tab fetch for one year, kept in storage
+// so the panel can recover it if its message to the worker
+// timed out while the worker kept going and stored the file.
+function recordSjrTabFetch(outcome) {
+  try {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local || !outcome || !outcome.year) return;
+    const key = "sjrTabFetch:" + outcome.year;
+    const save = {};
+    save[key] = { state: outcome.rows ? "fetched" : outcome.error, rows: outcome.rows || 0, at: new Date().toISOString(), detail: outcome.detail || "" };
+    chrome.storage.local.set(save, () => {});
+  } catch (err) { /* storage is best-effort here */ }
 }
 
 // "Check this page": read the DOI from the live DOM of the article
@@ -703,7 +974,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // one-click SJR download. Order is always auto-fetch first,
   // then one-click download+import, then manual import.
   if (message && message.type === "fetchMjlCategory") {
-    fetchMjlCategory(message.issns || (message.issn ? [message.issn] : []))
+    fetchMjlCategory(message.issns || (message.issn ? [message.issn] : []), message.journal || "")
       .then((r) => sendResponse(r))
       .catch((err) => sendResponse({ error: "network", detail: String(err && err.message || err) }));
     return true;

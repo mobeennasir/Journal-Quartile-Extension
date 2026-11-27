@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Journal Quartile Extension — Phase 2</title>
+  <title>Journal Quartile Extension</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -74,6 +74,8 @@
       <div class="button-row">
         <button id="batch-run" type="button" class="primary" disabled>Upload and check all articles</button>
         <button id="batch-testset" type="button" class="ghost">Use the Naqqash test set (67 articles)</button>
+        <button id="batch-stop" type="button" class="ghost" hidden>Stop batch</button>
+        <button id="batch-resume" type="button" class="primary" hidden>Resume batch</button>
       </div>
       <p id="batch-status" class="status" aria-live="polite"></p>
       <p id="batch-sjr-status" class="status" aria-live="polite"></p>
@@ -165,6 +167,7 @@
     </section>
 
     <footer class="foot">Sources: Crossref, OpenAlex fallback. WoS category and SJR quartile are free. JCR quartile and Impact Factor need an imported JCR file.</footer>
+    <p class="credit">Built by Mobeen Nasir</p>
     <p id="storage-note" class="hint" hidden></p>
     <button id="open-tab" type="button" class="ghost">Open in a full tab</button>
   </main>

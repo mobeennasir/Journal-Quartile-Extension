@@ -5,7 +5,7 @@
       "16": "icons/icon16.png",
       "48": "icons/icon48.png"
     },
-    "default_title": "Journal Quartile Extension \u2014 Phase 2"
+    "default_title": "Journal Quartile Extension"
   },
   "background": {
     "service_worker": "background.js"
@@ -50,7 +50,8 @@
     "48": "icons/icon48.png"
   },
   "manifest_version": 3,
-  "name": "Journal Quartile Extension \u2014 Phase 2",
+  "name": "Journal Quartile Extension",
+  "author": "Mobeen Nasir",
   "permissions": [
     "storage",
     "activeTab",
@@ -61,5 +62,5 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  "version": "0.4.1"
+  "version": "0.4.2"
 }

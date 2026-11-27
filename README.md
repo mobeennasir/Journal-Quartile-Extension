@@ -85,11 +85,11 @@ After any update, run `git pull` in the folder, then click **Reload** on the ext
 
 ## Status
 
-Version **0.4.1**, 27 November 2026. Tests pass: `node tests/run-tests.js` gives 214 passed, 0 failed. UI uses the Flame Q brand palette (flame orange, dark burgundy). The free WoS and SJR data are fetched automatically; the WoS category is read from the rendered Master Journal List page in the browser, and the SJR download runs through a browser tab when the direct download is blocked.
+Version **0.4.2**, 27 November 2026. Tests pass: `node tests/run-tests.js` gives 384 passed, 0 failed (section 34 covers batch resume, ownership and the security sweep). UI uses the Flame Q brand palette (flame orange, dark burgundy). The free WoS and SJR data are fetched automatically; the WoS category is read from the rendered Master Journal List page in the browser, and the SJR download runs through a browser tab when the direct download is blocked. A batch interrupted by the panel closing or the browser restarting can be resumed from where it stopped, and every WoS category fetched is saved in the extension database.
 
 ## Files
 
-- `manifest.json` - Manifest V3, version 0.4.1.
+- `manifest.json` - Manifest V3, version 0.4.2. Author: Mobeen Nasir.
 - `sidepanel.html`, `popup.css`, `popup.js` - the side panel UI and logic. Plain HTML and JavaScript, no dependencies, no build step, no remotely hosted code.
 - `shared.js` - the one copy of the DOI logic, shared by the page and the service worker. Also holds the full-tab helpers and the upload file-type guard.
 - `freedata.js` - the free data without JCR: Master Journal List search URLs and parsing, SJR download URLs and checks, latest SJR year.

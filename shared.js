@@ -8,11 +8,14 @@ const DOI_PATTERN = /10\.\d{4,9}\/[-._;()/:A-Z0-9]+/i;
 function extractDoi(raw) {
   let text = (raw || "").trim();
   if (!text) return null;
-  text = text.replace(/[.,;)\]]+$/, "");
+  // A DOI never ends in punctuation or a slash: copy-paste from
+  // a sentence or a doi.org link with a trailing slash must not
+  // leave one behind, or Crossref answers 404 for it.
+  text = text.replace(/[.,;)\]\/]+$/, "");
   const doiOrg = text.match(/doi\.org\/(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)/i);
-  if (doiOrg) return doiOrg[1];
+  if (doiOrg) return doiOrg[1].replace(/[.,;)\]\/]+$/, "");
   const match = text.match(DOI_PATTERN);
-  return match ? match[0] : null;
+  return match ? match[0].replace(/[.,;)\]\/]+$/, "") : null;
 }
 
 // Publisher slug -> DOI mapping. This is a FALLBACK only, never the
@@ -171,6 +174,45 @@ function isAllowedFileType(fileName, allowed) {
   return (allowed || []).indexOf(fileExtension(fileName)) !== -1;
 }
 
+// ---------- Title matching (shared, Node-testable) ----------
+// How much of the wanted title appears in the candidate title
+// (word overlap). Guards the title search against returning a
+// different article with a similar title. Unicode-aware: words
+// are Unicode letters/numbers, so an Urdu or Arabic title is
+// matched on its own words instead of being stripped to nothing.
+// Very short titles ("Bee gut") have no long words, so the
+// filter falls back to all words longer than one character.
+function titleWords(s) {
+  const all = String(s || "").toLowerCase().replace(/[^\p{L}\p{N} ]/gu, " ").split(/\s+/).filter(Boolean);
+  const long = all.filter((w) => w.length > 3 || /[^\x00-\x7F]/.test(w));
+  return long.length ? long : all.filter((w) => w.length > 1);
+}
+
+function titleOverlap(wanted, candidate) {
+  const want = titleWords(wanted);
+  if (!want.length) return 0;
+  const cand = new Set(titleWords(candidate));
+  const hits = want.filter((w) => cand.has(w)).length;
+  return hits / want.length;
+}
+
+// ---------- Upload file-size guard ----------
+// A huge file (a 100 MB CSV, a bloated .xlsx) would freeze the
+// panel while it is read into memory. "" when the size is fine,
+// else a short plain error. Pure, Node-testable.
+function fileSizeError(sizeBytes, maxBytes, what) {
+  const size = Number(sizeBytes) || 0;
+  if (size <= maxBytes) return "";
+  const mb = Math.round(size / 1048576);
+  const maxMb = Math.round(maxBytes / 1048576);
+  return "That file is too large (" + mb + " MB). Use a file under " + maxMb + " MB for " + what + ".";
+}
+
+// Max upload sizes: an article list is small text (65 rows is
+// ~12 KB); an SJR export is the biggest real file (~11 MB).
+const MAX_ARTICLE_LIST_BYTES = 10 * 1048576;
+const MAX_IMPORT_BYTES = 50 * 1048576;
+
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     extractDoi: extractDoi,
@@ -182,5 +224,10 @@ if (typeof module !== "undefined" && module.exports) {
     buildFullTabUrl: buildFullTabUrl,
     fileExtension: fileExtension,
     isAllowedFileType: isAllowedFileType,
+    titleWords: titleWords,
+    titleOverlap: titleOverlap,
+    fileSizeError: fileSizeError,
+    MAX_ARTICLE_LIST_BYTES: MAX_ARTICLE_LIST_BYTES,
+    MAX_IMPORT_BYTES: MAX_IMPORT_BYTES,
   };
 }
