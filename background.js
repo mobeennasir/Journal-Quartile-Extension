@@ -26,12 +26,18 @@ importScripts("xlsx.js");
 //
 // Honest limits, found 27 Nov 2026:
 //   * SJR blocks automated downloads with a Cloudflare
-//     human-verification page. A service-worker fetch cannot
-//     pass it, so fetchSjrViaTab opens the SJR home page in a
-//     background tab in the USER's browser (the challenge clears
-//     for a real browser) and the worker then re-fetches the CSV
-//     with cookies included. If that still fails, the manual
-//     import remains.
+//     human-verification page on journalrank.php. A service-
+//     worker fetch cannot pass it, and the first tab fix did
+//     not either: it opened the SJR HOME page, which is NOT
+//     challenged (HTTP 200 from a datacenter IP), so no
+//     clearance was ever earned — and a Lax clearance cookie
+//     would not be sent on a cross-origin worker fetch anyway.
+//     The working path (fetchSjrViaTab) opens the challenged
+//     journalrank.php page itself in the user's browser, polls
+//     until the managed challenge clears, then fetches the CSV
+//     FROM THE TAB, in page context (same origin, cookies
+//     attached). If the challenge never clears, that is
+//     reported plainly and the manual import remains.
 //   * The MJL file download needs a free MJL login (and the full
 //     list is subscriber-only, per Clarivate), so the file fetch
 //     normally fails at the login wall. The per-article category
@@ -450,43 +456,92 @@ async function fetchMjlCategory(issns) {
   return result;
 }
 
+// Fetch the SJR CSV FROM INSIDE a tab on scimagojr.com.
+// Same origin as the page, so the Cloudflare clearance cookie
+// earned by the tab is sent with the request — a cross-origin
+// fetch from the worker cannot send it (Lax cookie). Tries both
+// export URL spellings and validates the result is really the
+// SJR CSV, not a challenge page. ONE executeScript call, func
+// only, fully self-contained (same rule as checkThisPage: no
+// cross-call persistence to fail). Returns { text } or { error }.
+async function fetchSjrCsvInTab(tabId, year) {
+  const urls = FREE.sjrExportUrls(year);
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: async (urls) => {
+        for (const url of urls) {
+          try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 15000);
+            let res;
+            try {
+              res = await fetch(url, { credentials: "include", signal: controller.signal, headers: { Accept: "text/csv, */*" } });
+            } finally { clearTimeout(timer); }
+            if (!res.ok) continue;
+            const text = await res.text();
+            if (!text || text.trim().startsWith("<")) continue;
+            const head = text.slice(0, 2000).toLowerCase().replace(/_/g, " ");
+            if (head.indexOf("issn") !== -1 && head.indexOf("sjr best quartile") !== -1) {
+              return { ok: true, text };
+            }
+          } catch (e) { /* try the next spelling */ }
+        }
+        return { ok: false };
+      },
+      args: [urls],
+    });
+  } catch (err) {
+    return { error: "blocked" };
+  }
+  const first = results && results[0];
+  if (!first || first.error) return { error: "blocked" };
+  if (first.result && first.result.ok) return { text: first.result.text };
+  return { error: "blocked" };
+}
+
 // One-click download + import (fallback when the background
-// fetch is blocked): open the SJR home page in a background tab
-// in the USER's browser — Cloudflare's managed challenge clears
-// for a real browser, and the clearance cookie is set — then
-// re-fetch the CSV from the worker WITH cookies included, so the
-// clearance is sent. The old version read document.body.innerText
-// from a tab opened on the CSV URL itself, which cannot work:
-// a CSV URL triggers a file download in Chrome, so the tab has
-// no text to read. The tab is always closed afterwards, and no
-// file is downloaded into the user's Downloads folder. The
-// imported data is stored until expiry like every other import.
-// Returns { rows, year, via } or { error, year }.
+// fetch is blocked): open the SJR journal ranking page itself
+// in a background tab in the USER's browser — that is the page
+// Cloudflare actually challenges (the home page is not, so
+// opening it earned no clearance: the old bug) — poll until
+// the managed challenge clears, then fetch the CSV FROM THE
+// TAB (fetchSjrCsvInTab, same origin, cookies attached) and
+// import it. The tab is always closed afterwards, and no file
+// is downloaded into the user's Downloads folder. The imported
+// data is stored until expiry like every other import.
+// Returns { rows, year, via } or { error, year } where error
+// is "challenge" (the human check never cleared), "blocked"
+// (the in-tab CSV fetch still got no CSV), or "failed".
 async function fetchSjrViaTab(year) {
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({ url: FREE.sjrHomeUrl, active: false });
+    const tab = await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false });
     tabId = tab.id;
-    // Wait for the page (and the Cloudflare challenge, if any)
-    // to finish, then give the challenge a few more seconds.
-    await waitForTabLoad(tabId, 30000);
-    await sleepMs(6000);
+    await waitForTabLoad(tabId, 20000);
+    // Poll until the challenge clears (a managed challenge
+    // auto-solves in a real browser) — up to ~40s. The old
+    // version waited a fixed 6s and never checked at all.
+    let cleared = false;
+    for (let i = 0; i < 20; i++) {
+      let text = "";
+      try { text = await readTabText(tabId); } catch (err) { break; }
+      if (text && text.length > 500 && !FREE.isChallengeText(text)) { cleared = true; break; }
+      await sleepMs(2000);
+    }
+    if (!cleared) return { error: "challenge", year };
+    const fetched = await fetchSjrCsvInTab(tabId, year);
+    if (fetched.error) return { error: fetched.error, year };
+    const done = await importSjrText(fetched.text, year);
+    if (!done.rows) return { error: "not-csv", year };
+    return { rows: done.rows, skipped: done.skipped, year, via: "browser-tab" };
   } catch (err) {
-    // No tab (or it failed to load): the worker fetch below
-    // still runs with whatever cookies exist; it just may fail.
+    return { error: "failed", year, detail: String(err && err.message || err) };
   } finally {
     if (tabId !== null && chrome.tabs && chrome.tabs.remove) {
       try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ }
     }
-  }
-  const fetched = await fetchSjrYear(year);
-  if (fetched.error) return { error: fetched.error === "blocked" ? "blocked" : "not-csv", year };
-  try {
-    const done = await importSjrText(fetched.text, year);
-    if (!done.rows) return { error: "not-csv", year };
-    return { rows: done.rows, skipped: done.skipped, year, via: "browser-download" };
-  } catch (err) {
-    return { error: "failed", year, detail: String(err && err.message || err) };
   }
 }
 

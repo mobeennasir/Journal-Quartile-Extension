@@ -48,7 +48,26 @@
   // (verified 27 Nov 2026 for ISSN 1471-2180 and 0944-5013).
 
   var MJL_SEARCH_BASE = "https://mjl.clarivate.com/search-results?issn=";
-  var SJR_HOME_URL = "https://www.scimagojr.com/";
+
+  // SJR journal ranking page for one year (the HTML page, not
+  // the CSV): this is the page Cloudflare actually challenges.
+  // The home page does NOT challenge (verified 27 Nov 2026: the
+  // home page returns HTTP 200 with real HTML from a datacenter
+  // IP, while journalrank.php returns 403 "Just a moment..."),
+  // so opening the home page as a "clearance tab" never earns
+  // any clearance — that is why the old fix failed in the user's
+  // real Chrome 4-5 times in a row.
+  function sjrRankPageUrl(year) {
+    return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year));
+  }
+
+  // Is this text a Cloudflare challenge page ("Just a moment...",
+  // "Verify you are human") rather than the real page? Used to
+  // poll a background tab until the managed challenge clears.
+  function isChallengeText(text) {
+    if (!text) return true;
+    return /just a moment|verify you are human|checking your browser|cf-challenge|attention required/i.test(String(text).slice(0, 20000));
+  }
 
   function formatIssnHyphen(compact) {
     const s = String(compact || "").replace(/[^0-9X]/gi, "").toUpperCase();
@@ -150,14 +169,24 @@
   // officially documented — so the extension tries out=csv first
   // and export=csv second. type=j = journals only.
   //
-  // ROOT CAUSE, found 27 Nov 2026: SJR answers automated fetches
-  // with a Cloudflare "Just a moment..." 403 (verified from this
-  // VM for both spellings). A service-worker fetch cannot pass
-  // that check. The fix is in background.js (fetchSjrViaTab): the
-  // SJR home page is opened once in a background tab in the
-  // USER's browser, where Cloudflare's managed challenge clears
-  // for a real browser, and the worker then re-fetches the CSV
-  // with credentials included, so the clearance cookie is sent.
+  // ROOT CAUSE, found 27 Nov 2026 (verified live from this VM,
+  // and confirmed by the user's real Chrome failing 4-5 times):
+  // SJR answers automated fetches of journalrank.php with a
+  // Cloudflare "Just a moment..." 403 (both URL spellings).
+  // The first fix opened the SJR HOME page in a background tab
+  // and re-fetched the CSV from the worker with cookies — but
+  // the home page is NOT challenged (HTTP 200, real HTML, from
+  // a datacenter IP), so no clearance was ever earned, and even
+  // a real clearance would not help: Cloudflare's cf_clearance
+  // cookie is Lax, and a Lax cookie is NOT sent on a cross-site
+  // fetch from the worker (chrome-extension:// origin). The
+  // only path that works is to fetch the CSV FROM THE TAB, in
+  // page context (same origin, cookies attached): open the
+  // journalrank.php page itself (the challenged page), poll
+  // until the managed challenge clears, then fetch the CSV
+  // inside the tab — see fetchSjrCsvInTab in background.js.
+  // If the challenge never clears, the panel says so plainly
+  // and offers the one-click manual download instead.
   function sjrExportUrl(year) {
     return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year)) + "&type=j&out=csv";
   }
@@ -254,7 +283,8 @@
 
   const api = {
     mjlSearchUrl: mjlSearchUrl,
-    sjrHomeUrl: SJR_HOME_URL,
+    sjrRankPageUrl: sjrRankPageUrl,
+    isChallengeText: isChallengeText,
     parseMjlSearchHtml: parseMjlSearchHtml,
     indexNameToCategory: indexNameToCategory,
     mjlDownloadsPage: MJL_DOWNLOADS_PAGE,

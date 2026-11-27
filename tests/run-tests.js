@@ -281,8 +281,10 @@ async function main() {
   check("popup.js falls back to chrome.tabs.getCurrent for a directly-opened tab", popupJs.indexOf("chrome.tabs.getCurrent") !== -1);
   check("popup.js click handler refuses to open a tab from a full tab",
     popupJs.indexOf('if (isFullTabUrl(window.location.href)) return;') !== -1);
-  check("popup.js opens the full tab with chrome.tabs.create (exactly one call site)",
-    (popupJs.match(/chrome\.tabs\.create\(/g) || []).length === 1);
+  check("popup.js opens tabs with chrome.tabs.create (exactly two call sites: full tab + SJR download page)",
+    (popupJs.match(/chrome\.tabs\.create\(/g) || []).length === 2
+    && popupJs.indexOf("chrome.tabs.create({ url })") !== -1
+    && popupJs.indexOf("chrome.tabs.create({ url, active: true })") !== -1);
   check("popup.js opens the marked URL (buildFullTabUrl)", popupJs.indexOf("buildFullTabUrl(base)") !== -1);
   const css = fs.readFileSync(path.join(DIR, "..", "popup.css"), "utf8");
   check("popup.css: [hidden] actually hides (author display rules beat the UA style)",
@@ -500,8 +502,9 @@ async function main() {
   check("old 'Unknown, needs WoS / JCR data' wording is gone from panel and popup",
     popupJs.indexOf("needs WoS / JCR data") === -1 && panelHtml.indexOf("needs WoS / JCR data") === -1);
   const bgJs = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
-  check("background has the one-click browser-tab SJR download (clearance tab, then worker fetch)",
-    bgJs.indexOf("fetchSjrViaTab") !== -1 && bgJs.indexOf("chrome.tabs.create({ url: FREE.sjrHomeUrl, active: false })") !== -1
+  check("background has the one-click browser-tab SJR download (challenged ranking page, in-tab CSV fetch)",
+    bgJs.indexOf("fetchSjrViaTab") !== -1 && bgJs.indexOf("fetchSjrCsvInTab") !== -1
+    && bgJs.indexOf("chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })") !== -1
     && bgJs.indexOf('message.type === "fetchSjrViaTab"') !== -1);
   check("background closes the download tab afterwards", bgJs.indexOf("chrome.tabs.remove(tabId)") !== -1);
   check("background auto-fetch skips a source whose stored data is still valid",
@@ -584,8 +587,8 @@ async function main() {
   check("MJL rendered text: ESCI parses to X", FREE.parseMjlSearchHtml(mjlRenderedEsci).category === "X");
   const mjlRenderedZero = 'Search results\nFound 0 results';
   check("MJL rendered text: 0 results is not-indexed", FREE.parseMjlSearchHtml(mjlRenderedZero).found === "not-indexed");
-  check("freedata exposes the SJR home URL for the clearance tab",
-    FREE.sjrHomeUrl === "https://www.scimagojr.com/");
+  check("freedata exposes the SJR ranking page URL for the tab fetch",
+    FREE.sjrRankPageUrl(2025) === "https://www.scimagojr.com/journalrank.php?year=2025");
   check("freedata sjrExportUrls returns both spellings",
     eq(FREE.sjrExportUrls(2025), ["https://www.scimagojr.com/journalrank.php?year=2025&type=j&out=csv", "https://www.scimagojr.com/journalrank.php?year=2025&type=j&export=csv"]));
   // ROOT CAUSE 2 (SJR): Cloudflare 403s automated fetches
@@ -602,9 +605,9 @@ async function main() {
     bgJs.indexOf("chrome.tabs.remove(tabId)") !== -1);
   check("background caches WoS answers in memory so a batch does not re-tab the same journal",
     bgJs.indexOf("mjlCategoryCache") !== -1 && bgJs.indexOf("mjlCategoryCache.has(cacheKey)") !== -1);
-  check("background SJR tab path opens the SJR home page (clearance), not the CSV URL",
-    bgJs.indexOf("chrome.tabs.create({ url: FREE.sjrHomeUrl, active: false })") !== -1
-    && bgJs.indexOf("chrome.tabs.create({ url, active: false })") === -1);
+  check("background SJR tab path opens the challenged ranking page, not the home page",
+    bgJs.indexOf("chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })") !== -1
+    && bgJs.indexOf("FREE.sjrHomeUrl") === -1);
   check("background SJR fetch sends cookies (clearance) with the request",
     bgJs.indexOf('credentials: credentials || "same-origin"') !== -1
     && bgJs.indexOf('fetchTextTimeout(url, 60000, "text/csv, */*", "include")') !== -1);
@@ -628,6 +631,49 @@ async function main() {
     /h1\s*\{[^}]*color:\s*#571B1B/.test(css) && css.indexOf("linear-gradient(90deg, #FF9500, #FF5A1F 55%, #FF2D55)") !== -1);
   check("Flame Q theme: focus ring and toggle use flame orange",
     css.indexOf("rgba(255, 90, 31, 0.18)") !== -1 && css.indexOf("accent-color: #FF5A1F") !== -1);
+
+  console.log("== 24. SJR fetch fix: in-tab CSV fetch, challenge polling, manual download button (27 Nov 2026) ==");
+  // ROOT CAUSE (verified live from this VM): the SJR home page
+  // is NOT challenged (HTTP 200, real HTML, datacenter IP),
+  // while journalrank.php (HTML and CSV) is 403 "Just a
+  // moment...". The old fix opened the home page as a
+  // "clearance tab", so no clearance was ever earned — the
+  // user's real Chrome failed 4-5 times. And a Lax clearance
+  // cookie is never sent on a cross-origin worker fetch, so
+  // the worker re-fetch could not have worked even with one.
+  check("isChallengeText: Cloudflare challenge page is a challenge",
+    FREE.isChallengeText("<title>Just a moment...</title><body>Verify you are human</body>"));
+  check("isChallengeText: rendered ranking page is not a challenge",
+    !FREE.isChallengeText("SCImago Journal & Country Rank\nJournal Title SJR SJR Best Quartile H index"));
+  check("isChallengeText: empty text counts as not cleared (never proceed on nothing)",
+    FREE.isChallengeText(""));
+  check("background fetches the SJR CSV FROM THE TAB (same origin, cookies attached)",
+    bgJs.indexOf("fetchSjrCsvInTab") !== -1
+    && bgJs.indexOf('fetch(url, { credentials: "include"') !== -1
+    && bgJs.indexOf("FREE.sjrExportUrls(year)") !== -1);
+  check("background in-tab fetch is one self-contained executeScript call (no cross-call persistence)",
+    bgJs.indexOf("chrome.scripting.executeScript({") !== -1
+    && bgJs.indexOf("target: { tabId },") !== -1
+    && bgJs.indexOf("args: [urls]") !== -1);
+  check("background polls the tab until the challenge clears, then reports 'challenge' if it never does",
+    bgJs.indexOf("FREE.isChallengeText(text)") !== -1
+    && bgJs.indexOf('return { error: "challenge", year }') !== -1);
+  check("background always closes the SJR tab afterwards",
+    bgJs.indexOf("fetchSjrViaTab") !== -1 && bgJs.indexOf("chrome.tabs.remove(tabId)") !== -1);
+  check("background imports the in-tab CSV text with the normal importer (stored until expiry)",
+    bgJs.indexOf("importSjrText(fetched.text, year)") !== -1);
+  // Wiring: popup + panel.
+  check("popup gives the SJR tab fetch 120s (poll + in-tab fetch), not 90s",
+    popupJs.indexOf('sendBackgroundMessage({ type: "fetchSjrViaTab", year }, 120000)') !== -1);
+  check("popup names the real failure reason: challenge vs blocked",
+    popupJs.indexOf("SJR asked for a human check that did not clear") !== -1
+    && popupJs.indexOf("SJR blocked the download (bot check)") !== -1);
+  check("panel has an Open SJR download page button (one-click manual fallback)",
+    html2.indexOf('id="sjr-open-page"') !== -1);
+  check("popup wires the Open SJR download page button to the ranking page for the chosen year, in a visible tab",
+    popupJs.indexOf('getElementById("sjr-open-page")') !== -1
+    && popupJs.indexOf("journalrank.php?year=${year}") !== -1
+    && popupJs.indexOf("chrome.tabs.create({ url, active: true })") !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));

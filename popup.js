@@ -57,6 +57,7 @@ const autoFetchToggleEl = document.getElementById("auto-fetch");
 const freeDataStatusEl = document.getElementById("free-data-status");
 const sjrYearEl = document.getElementById("sjr-year");
 const sjrFetchBtn = document.getElementById("sjr-fetch");
+const sjrOpenPageBtn = document.getElementById("sjr-open-page");
 const mjlFetchBtn = document.getElementById("mjl-fetch");
 const batchMjlBtn = document.getElementById("batch-mjl");
 
@@ -1050,7 +1051,7 @@ if (sjrFetchBtn) {
       }
       if (res && (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
         sjrStatusEl.textContent = "Direct download blocked. Trying the download in your browser…";
-        res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year }, 90000);
+        res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year }, 120000);
         if (res && res.rows) {
           sjrStatusEl.textContent = `SJR data: ${res.rows} rows for ${year}, saved from the browser download. ${DATA.validUntilText(new Date().toISOString(), "sjr")}.`;
           sjrStatusEl.classList.remove("error");
@@ -1058,12 +1059,38 @@ if (sjrFetchBtn) {
           return;
         }
       }
-      sjrStatusEl.textContent = "SJR blocked the download (bot check). Download the CSV from scimagojr.com yourself and use Import SJR file below.";
+      // Every failure now names its real reason and the one
+      // working next step: open the SJR download page, download
+      // the CSV for this year, then use Import SJR file below.
+      // "challenge" = the human check never cleared in the tab;
+      // anything else = the CSV fetch itself was still blocked.
+      sjrStatusEl.textContent = res && res.error === "challenge"
+        ? `SJR asked for a human check that did not clear. Tap “Open SJR download page”, download the CSV for ${year}, then use Import SJR file below.`
+        : `SJR blocked the download (bot check). Tap “Open SJR download page”, download the CSV for ${year}, then use Import SJR file below.`;
       sjrStatusEl.classList.add("error");
       refreshImportStatus();
     } finally {
       sjrFetchBtn.disabled = false;
     }
+  });
+}
+
+// "Open SJR download page": the one-click manual fallback when
+// the automatic fetch is blocked. Opens the SJR journal ranking
+// page for the chosen year in a VISIBLE tab, so the user can
+// pass the human check themselves and download the CSV, then
+// import it with "Choose SJR file" + "Import SJR file" below.
+if (sjrOpenPageBtn) {
+  sjrOpenPageBtn.addEventListener("click", () => {
+    const year = parseInt(sjrYearEl.value, 10) || new Date().getFullYear() - 1;
+    const url = `https://www.scimagojr.com/journalrank.php?year=${year}`;
+    if (typeof chrome !== "undefined" && chrome.tabs && chrome.tabs.create) {
+      chrome.tabs.create({ url, active: true });
+    } else {
+      window.open(url, "_blank");
+    }
+    sjrStatusEl.textContent = `Opened the SJR download page for ${year}. Download the CSV, then use Import SJR file below.`;
+    sjrStatusEl.classList.remove("error");
   });
 }
 
