@@ -31,7 +31,24 @@
 
   // ---------- MJL (WoS category) ----------
 
+  // ROOT CAUSE, found 27 Nov 2026 (user's real Chrome showed
+  // "Unknown — WoS list could not be read"): the MJL search page
+  // is an Angular single-page app. A plain fetch returns only the
+  // 11 KB HTML shell — no journal, no "Core Collection:" label,
+  // nothing to parse — so the old fetch-and-parse path always
+  // answered "unreadable". The label only exists AFTER the page's
+  // JavaScript runs in a real browser tab. The background worker
+  // therefore reads the RENDERED page in a background tab
+  // (fetchMjlCategoryViaTab in background.js) and parses that
+  // text with the same parseMjlSearchHtml below. The MJL JSON API
+  // (/api/jprof/public/rank-search, POST) was also tried and is
+  // NOT usable: it 404s even with the site's cookies, so it is
+  // undocumented/private and is not called. OpenAlex cannot
+  // replace it either: its source record has no WoS index field
+  // (verified 27 Nov 2026 for ISSN 1471-2180 and 0944-5013).
+
   var MJL_SEARCH_BASE = "https://mjl.clarivate.com/search-results?issn=";
+  var SJR_HOME_URL = "https://www.scimagojr.com/";
 
   function formatIssnHyphen(compact) {
     const s = String(compact || "").replace(/[^0-9X]/gi, "").toUpperCase();
@@ -132,11 +149,23 @@
   // (?year=2022&type=j&out=csv and ?year=2023&export=csv), neither
   // officially documented — so the extension tries out=csv first
   // and export=csv second. type=j = journals only.
+  //
+  // ROOT CAUSE, found 27 Nov 2026: SJR answers automated fetches
+  // with a Cloudflare "Just a moment..." 403 (verified from this
+  // VM for both spellings). A service-worker fetch cannot pass
+  // that check. The fix is in background.js (fetchSjrViaTab): the
+  // SJR home page is opened once in a background tab in the
+  // USER's browser, where Cloudflare's managed challenge clears
+  // for a real browser, and the worker then re-fetches the CSV
+  // with credentials included, so the clearance cookie is sent.
   function sjrExportUrl(year) {
     return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year)) + "&type=j&out=csv";
   }
   function sjrExportUrlAlt(year) {
     return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year)) + "&type=j&export=csv";
+  }
+  function sjrExportUrls(year) {
+    return [sjrExportUrl(year), sjrExportUrlAlt(year)];
   }
 
   // Does this downloaded text look like the SJR CSV (sjrdata
@@ -225,6 +254,7 @@
 
   const api = {
     mjlSearchUrl: mjlSearchUrl,
+    sjrHomeUrl: SJR_HOME_URL,
     parseMjlSearchHtml: parseMjlSearchHtml,
     indexNameToCategory: indexNameToCategory,
     mjlDownloadsPage: MJL_DOWNLOADS_PAGE,
@@ -234,6 +264,7 @@
     sjrLatestYear: sjrLatestYear,
     sjrExportUrl: sjrExportUrl,
     sjrExportUrlAlt: sjrExportUrlAlt,
+    sjrExportUrls: sjrExportUrls,
     isSjrCsv: isSjrCsv,
     looksBlocked: looksBlocked,
   };

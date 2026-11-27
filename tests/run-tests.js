@@ -500,8 +500,8 @@ async function main() {
   check("old 'Unknown, needs WoS / JCR data' wording is gone from panel and popup",
     popupJs.indexOf("needs WoS / JCR data") === -1 && panelHtml.indexOf("needs WoS / JCR data") === -1);
   const bgJs = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
-  check("background has the one-click browser-tab SJR download",
-    bgJs.indexOf("fetchSjrViaTab") !== -1 && bgJs.indexOf("chrome.tabs.create({ url, active: false })") !== -1
+  check("background has the one-click browser-tab SJR download (clearance tab, then worker fetch)",
+    bgJs.indexOf("fetchSjrViaTab") !== -1 && bgJs.indexOf("chrome.tabs.create({ url: FREE.sjrHomeUrl, active: false })") !== -1
     && bgJs.indexOf('message.type === "fetchSjrViaTab"') !== -1);
   check("background closes the download tab afterwards", bgJs.indexOf("chrome.tabs.remove(tabId)") !== -1);
   check("background auto-fetch skips a source whose stored data is still valid",
@@ -513,8 +513,8 @@ async function main() {
   check("background handles fetchMjlCategory and fetchSjrExport messages",
     bgJs.indexOf('message.type === "fetchMjlCategory"') !== -1
     && bgJs.indexOf('message.type === "fetchSjrExport"') !== -1);
-  check("manifest is 0.4.0 with MJL and SJR host permissions",
-    manifest.version === "0.4.0"
+  check("manifest is 0.4.1 with MJL and SJR host permissions",
+    manifest.version === "0.4.1"
     && manifest.host_permissions.indexOf("https://mjl.clarivate.com/*") !== -1
     && manifest.host_permissions.indexOf("https://www.scimagojr.com/*") !== -1
     && manifest.host_permissions.indexOf("https://scimagojr.com/*") !== -1);
@@ -552,8 +552,8 @@ async function main() {
   check("spreadsheet reader rejects other types and names all three",
     popupJs.indexOf("Unsupported file type — use a .csv, .xlsx or .xls file.") !== -1);
   // UI polish: buttons (upload stands out), hierarchy, scanability.
-  check("upload button stands out: navy, taller, stronger shadow",
-    /#batch-run\s*\{[^}]*background:\s*#12324f[^}]*min-height:\s*46px[^}]*box-shadow:\s*0 2px 6px/.test(css));
+  check("upload button stands out: flame gradient, taller, stronger shadow",
+    /#batch-run\s*\{[^}]*background:\s*linear-gradient\(135deg, #FF9500, #FF5A1F 55%, #FF2D55\)[^}]*min-height:\s*46px[^}]*box-shadow:\s*0 2px 6px/.test(css));
   check("primary buttons share one style with a soft shadow",
     /\.primary\s*\{[^}]*box-shadow:\s*0 1px 3px/.test(css));
   check("file-choose buttons are consistent inline-flex tap targets",
@@ -565,6 +565,69 @@ async function main() {
   check("result card is lifted with a soft shadow", /\.result\s*\{[^}]*box-shadow:\s*0 1px 4px/.test(css));
   check("mode tabs and ghost buttons meet a 36px tap target",
     /\.mode-tab\s*\{[^}]*min-height:\s*40px/.test(css) && /\.ghost\s*\{[^}]*min-height:\s*36px/.test(css));
+
+  console.log("== 23. Free-data fix: rendered MJL tab, SJR clearance cookie, Flame Q theme (27 Nov 2026) ==");
+  // ROOT CAUSE 1 (WoS): the MJL search page is an Angular SPA.
+  // A plain fetch returns only the 11 KB HTML shell — verified
+  // live from this VM — so the old fetch-and-parse path always
+  // answered "unreadable". The label only exists after the
+  // page's JavaScript renders in a real browser tab.
+  const mjlShell = '<!DOCTYPE html><html lang="en"><head><base href="/"/><meta charset="UTF-8"/></head><body><div id="root"></div><script src="/mjl/main.js"></script></body></html>';
+  check("MJL SPA shell HTML has no result info at all (unknown), never a category",
+    FREE.parseMjlSearchHtml(mjlShell).found === "unknown" && FREE.parseMjlSearchHtml(mjlShell).category === "");
+  // The same parser on RENDERED page text (innerText) finds the label.
+  const mjlRendered = 'BMC Microbiology\nFound 1 results\nWeb of Science Core Collection: Science Citation Index Expanded\nISSN / eISSN: 1471-2180';
+  const parsedRendered = FREE.parseMjlSearchHtml(mjlRendered);
+  check("MJL rendered text: SCIE parses to W (BMC Microbiology, 1471-2180)",
+    parsedRendered.index === "SCIE" && parsedRendered.category === "W" && parsedRendered.found === "result", JSON.stringify(parsedRendered));
+  const mjlRenderedEsci = 'Found 1 results\nWeb of Science Core Collection: Emerging Sources Citation Index';
+  check("MJL rendered text: ESCI parses to X", FREE.parseMjlSearchHtml(mjlRenderedEsci).category === "X");
+  const mjlRenderedZero = 'Search results\nFound 0 results';
+  check("MJL rendered text: 0 results is not-indexed", FREE.parseMjlSearchHtml(mjlRenderedZero).found === "not-indexed");
+  check("freedata exposes the SJR home URL for the clearance tab",
+    FREE.sjrHomeUrl === "https://www.scimagojr.com/");
+  check("freedata sjrExportUrls returns both spellings",
+    eq(FREE.sjrExportUrls(2025), ["https://www.scimagojr.com/journalrank.php?year=2025&type=j&out=csv", "https://www.scimagojr.com/journalrank.php?year=2025&type=j&export=csv"]));
+  // ROOT CAUSE 2 (SJR): Cloudflare 403s automated fetches
+  // (verified live from this VM for both URL spellings).
+  check("looksBlocked: SJR Cloudflare challenge page is a block",
+    FREE.looksBlocked("<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>challenges.cloudflare.com</body></html>", 403));
+  // Wiring: background worker.
+  check("background reads the rendered MJL page in a background tab",
+    bgJs.indexOf("fetchMjlCategoryViaTab") !== -1
+    && bgJs.indexOf("chrome.tabs.create({ url: FREE.mjlSearchUrl(issn), active: false })") !== -1
+    && bgJs.indexOf("parseMjlSearchHtml(text)") !== -1
+    && bgJs.indexOf("chrome.scripting.executeScript") !== -1);
+  check("background always closes the MJL tab afterwards",
+    bgJs.indexOf("chrome.tabs.remove(tabId)") !== -1);
+  check("background caches WoS answers in memory so a batch does not re-tab the same journal",
+    bgJs.indexOf("mjlCategoryCache") !== -1 && bgJs.indexOf("mjlCategoryCache.has(cacheKey)") !== -1);
+  check("background SJR tab path opens the SJR home page (clearance), not the CSV URL",
+    bgJs.indexOf("chrome.tabs.create({ url: FREE.sjrHomeUrl, active: false })") !== -1
+    && bgJs.indexOf("chrome.tabs.create({ url, active: false })") === -1);
+  check("background SJR fetch sends cookies (clearance) with the request",
+    bgJs.indexOf('credentials: credentials || "same-origin"') !== -1
+    && bgJs.indexOf('fetchTextTimeout(url, 60000, "text/csv, */*", "include")') !== -1);
+  check("background auto-fetch retries a blocked SJR download through the browser tab",
+    bgJs.indexOf("fetchSjrViaTab(sjrYear)") !== -1);
+  check("background keeps the direct MJL fetch as the fast path before the tab",
+    bgJs.indexOf("fetchTextTimeout(FREE.mjlSearchUrl(issn)") !== -1);
+  // Wiring: popup.
+  check("popup gives the MJL tab fallback 90s, not 25s",
+    popupJs.indexOf('sendBackgroundMessage({ type: "fetchMjlCategory", issns: issns || [] }, 90000)') !== -1);
+  check("popup shows a distinct message when the WoS site blocks the check",
+    popupJs.indexOf("Unknown — WoS site blocked the check") !== -1);
+  // Flame Q theme: no teal or navy left in the stylesheet.
+  check("Flame Q theme: no teal (#0f766e) or navy (#12324f) left in popup.css",
+    css.indexOf("#0f766e") === -1 && css.indexOf("#12324f") === -1 && css.indexOf("#0b5e57") === -1);
+  check("Flame Q theme: primary buttons use the flame gradient",
+    /\.primary\s*\{[^}]*background:\s*linear-gradient\(135deg, #FF9500, #FF5A1F 55%, #FF2D55\)/.test(css));
+  check("Flame Q theme: upload button keeps the flame gradient, taller, stronger shadow",
+    /#batch-run\s*\{[^}]*background:\s*linear-gradient\(135deg, #FF9500, #FF5A1F 55%, #FF2D55\)[^}]*min-height:\s*46px[^}]*box-shadow:\s*0 2px 6px/.test(css));
+  check("Flame Q theme: headings use dark burgundy, progress bar is flame",
+    /h1\s*\{[^}]*color:\s*#571B1B/.test(css) && css.indexOf("linear-gradient(90deg, #FF9500, #FF5A1F 55%, #FF2D55)") !== -1);
+  check("Flame Q theme: focus ring and toggle use flame orange",
+    css.indexOf("rgba(255, 90, 31, 0.18)") !== -1 && css.indexOf("accent-color: #FF5A1F") !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));

@@ -340,7 +340,9 @@ function sendBackgroundMessage(message, timeoutMs) {
 }
 
 async function fetchMjlCategory(issns) {
-  return sendBackgroundMessage({ type: "fetchMjlCategory", issns: issns || [] }, 25000);
+  // 90s: the rendered-tab fallback (background tab + Angular
+  // render) can take ~30s per journal.
+  return sendBackgroundMessage({ type: "fetchMjlCategory", issns: issns || [] }, 90000);
 }
 
 function wosCategoryText(category) {
@@ -373,6 +375,8 @@ async function updateWosCategory(data, rank) {
   if (ddNow) {
     ddNow.textContent = res && res.notIndexed
       ? "Not in the WoS list"
+      : res && res.error === "blocked"
+      ? "Unknown — WoS site blocked the check"
       : "Unknown — WoS list could not be read";
   }
 }

@@ -26,21 +26,26 @@ importScripts("xlsx.js");
 //
 // Honest limits, found 27 Nov 2026:
 //   * SJR blocks automated downloads with a Cloudflare
-//     human-verification page from datacenter IPs. It may work
-//     from a real browser, or it may not — a block is reported
-//     plainly and the one-click download / manual import remain.
+//     human-verification page. A service-worker fetch cannot
+//     pass it, so fetchSjrViaTab opens the SJR home page in a
+//     background tab in the USER's browser (the challenge clears
+//     for a real browser) and the worker then re-fetches the CSV
+//     with cookies included. If that still fails, the manual
+//     import remains.
 //   * The MJL file download needs a free MJL login (and the full
 //     list is subscriber-only, per Clarivate), so the file fetch
-//     normally fails at the login wall. When it does, the WoS
-//     category is still checked automatically per article from
-//     the PUBLIC MJL search page (no login), which is what
-//     fetchMjlCategory below does. No values are ever invented.
+//     normally fails at the login wall. The per-article category
+//     still works without a login: the MJL search page is an
+//     Angular app, so a plain fetch returns only the HTML shell
+//     — fetchMjlCategory therefore reads the RENDERED page in a
+//     background tab in the user's browser. No values are ever
+//     invented.
 const FREE = (typeof JournalQuartileFreeData !== "undefined") ? JournalQuartileFreeData : null;
 const FDATA = (typeof JournalQuartileData !== "undefined") ? JournalQuartileData : null;
 const FXLSX = (typeof JournalQuartileXlsx !== "undefined") ? JournalQuartileXlsx : null;
 const AUTO_FETCH_INTERVAL_MS = 335 * 24 * 60 * 60 * 1000; // ~11 months
 
-function fetchTextTimeout(url, timeoutMs, accept) {
+function fetchTextTimeout(url, timeoutMs, accept, credentials) {
   const controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
   let timer = null;
   const timeoutPromise = new Promise((_, reject) => {
@@ -52,6 +57,12 @@ function fetchTextTimeout(url, timeoutMs, accept) {
   const run = fetch(url, {
     headers: { Accept: accept || "text/html, text/csv, */*" },
     signal: controller ? controller.signal : undefined,
+    // "include" sends the site's cookies (e.g. a Cloudflare
+    // clearance cookie earned by a real browser tab) with the
+    // request. Default is "same-origin", which sends nothing
+    // cross-origin — that is why the SJR fetch stayed blocked
+    // even after the user had visited scimagojr.com.
+    credentials: credentials || "same-origin",
   }).then(async (response) => ({ status: response.status, ok: response.ok, text: await response.text() }));
   return Promise.race([run, timeoutPromise]).finally(() => { if (timer) clearTimeout(timer); });
 }
@@ -96,14 +107,16 @@ function autoStatusSave(patch) {
   });
 }
 
-// SJR CSV for one year: try out=csv, then export=csv.
+// SJR CSV for one year: try out=csv, then export=csv. Cookies
+// are included, so a Cloudflare clearance cookie earned by a
+// real browser tab (see fetchSjrViaTab) is sent with the fetch.
 async function fetchSjrYear(year) {
   const urls = [FREE.sjrExportUrl(year), FREE.sjrExportUrlAlt(year)];
   let lastBlocked = false;
   for (const url of urls) {
     let res;
     try {
-      res = await fetchTextTimeout(url, 60000, "text/csv, */*");
+      res = await fetchTextTimeout(url, 60000, "text/csv, */*", "include");
     } catch (err) {
       continue; // network/timeout: try the alternate spelling
     }
@@ -242,9 +255,20 @@ async function autoFetchFreeData() {
   try {
     const fetched = await fetchSjrYear(sjrYear);
     if (fetched.error) {
-      status.sjr = fetched.error === "blocked"
-        ? { state: "blocked", year: sjrYear, at: now, detail: "SJR blocked the download (bot check)" }
-        : { state: "failed", year: sjrYear, at: now, detail: "SJR did not return a CSV file" };
+      // Direct fetch blocked (Cloudflare) or no CSV: try once
+      // through the user's browser tab, which can clear the
+      // bot check (see fetchSjrViaTab). Only then call it blocked.
+      let viaTab = null;
+      if (fetched.error === "blocked") {
+        try { viaTab = await fetchSjrViaTab(sjrYear); } catch (err) { viaTab = null; }
+      }
+      if (viaTab && viaTab.rows) {
+        status.sjr = { state: "ready", year: sjrYear, rows: viaTab.rows, at: now, via: "browser-download" };
+      } else {
+        status.sjr = fetched.error === "blocked"
+          ? { state: "blocked", year: sjrYear, at: now, detail: "SJR blocked the download (bot check)" }
+          : { state: "failed", year: sjrYear, at: now, detail: "SJR did not return a CSV file" };
+      }
     } else {
       const done = await importSjrText(fetched.text, sjrYear);
       status.sjr = done.rows
@@ -305,11 +329,90 @@ async function maybeAutoFetch() {
   } catch (err) { /* auto-fetch must never break the worker */ }
 }
 
-// WoS category for one article, from the PUBLIC MJL search page
-// (no login): try each ISSN in turn. Returns { category, index,
-// issn } or { error, notIndexed }.
+// WoS category for one article. Two paths, in order:
+//   1. Direct fetch of the MJL search page and parse it. This is
+//      fast when the page is server-rendered, but the live MJL
+//      page is an Angular app: a plain fetch returns only the
+//      11 KB HTML shell with no result data, so this path
+//      normally answers "unreadable" — that is the bug the user
+//      saw ("Unknown — WoS list could not be read").
+//   2. Rendered tab (fetchMjlCategoryViaTab): open the search
+//      page in a background tab in the USER's browser, let the
+//      app render, and read the "Web of Science Core Collection:"
+//      label from the rendered text. The tab is always closed.
+// Answers are cached in memory for the worker's lifetime, so a
+// batch run does not open one tab per row for the same journal.
+// Returns { category, index, issn } or { error, notIndexed }.
+const mjlCategoryCache = new Map();
+function sleepMs(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+async function waitForTabLoad(tabId, timeoutMs) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, timeoutMs || 30000);
+    const listener = (id, info) => {
+      if (id === tabId && info.status === "complete" && !done) {
+        done = true;
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(true);
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+async function readTabText(tabId) {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => (document.body ? document.body.innerText : ""),
+  });
+  return results && results[0] ? String(results[0].result || "") : "";
+}
+
+async function fetchMjlCategoryViaTab(issns) {
+  const list = (issns || []).filter(Boolean);
+  let sawUnreadable = false;
+  let sawBlocked = false;
+  for (const issn of list) {
+    let tabId = null;
+    try {
+      const tab = await chrome.tabs.create({ url: FREE.mjlSearchUrl(issn), active: false });
+      tabId = tab.id;
+      const loaded = await waitForTabLoad(tabId, 30000);
+      if (!loaded) { sawUnreadable = true; continue; }
+      // The Angular app renders after load: poll the rendered
+      // text until a result (or "0 results") appears, up to ~30s.
+      let parsed = { found: "unknown" };
+      for (let i = 0; i < 15; i++) {
+        await sleepMs(2000);
+        let text = "";
+        try { text = await readTabText(tabId); } catch (err) { break; }
+        if (FREE.looksBlocked(text, 200)) { sawBlocked = true; break; }
+        parsed = FREE.parseMjlSearchHtml(text);
+        if (parsed.found === "result" || parsed.found === "not-indexed") break;
+      }
+      if (parsed.found === "result" && parsed.category) {
+        return { category: parsed.category, index: parsed.index, issn };
+      }
+      if (parsed.found === "not-indexed") return { category: "", index: "", issn, notIndexed: true };
+      sawUnreadable = true;
+    } catch (err) {
+      sawUnreadable = true;
+    } finally {
+      if (tabId !== null && chrome.tabs && chrome.tabs.remove) {
+        try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ }
+      }
+    }
+  }
+  return { error: sawBlocked ? "blocked" : (sawUnreadable ? "unreadable" : "network") };
+}
+
 async function fetchMjlCategory(issns) {
   const list = (issns || []).filter(Boolean);
+  const cacheKey = list.join(",");
+  if (cacheKey && mjlCategoryCache.has(cacheKey)) return mjlCategoryCache.get(cacheKey);
+  let result = null;
   let sawUnreadable = false;
   for (const issn of list) {
     let res;
@@ -322,64 +425,69 @@ async function fetchMjlCategory(issns) {
     if (!res.ok) continue;
     const parsed = FREE.parseMjlSearchHtml(res.text);
     if (parsed.found === "result" && parsed.category) {
-      return { category: parsed.category, index: parsed.index, issn };
+      result = { category: parsed.category, index: parsed.index, issn };
+      break;
     }
-    if (parsed.found === "not-indexed") return { category: "", index: "", issn, notIndexed: true };
+    if (parsed.found === "not-indexed") {
+      result = { category: "", index: "", issn, notIndexed: true };
+      break;
+    }
     sawUnreadable = true;
   }
-  return { error: sawUnreadable ? "unreadable" : "network" };
+  if (!result) {
+    // Direct fetch cannot read the page (Angular shell): read
+    // the rendered page in the user's browser instead.
+    try {
+      result = await fetchMjlCategoryViaTab(list);
+    } catch (err) {
+      result = { error: sawUnreadable ? "unreadable" : "network" };
+    }
+    if (!result.error && !result.category && !result.notIndexed) {
+      result = { error: sawUnreadable ? "unreadable" : "network" };
+    }
+  }
+  if (cacheKey) mjlCategoryCache.set(cacheKey, result);
+  return result;
 }
 
 // One-click download + import (fallback when the background
-// fetch is blocked): open the SJR export URL in a background
-// tab in the USER's browser — Cloudflare sees a real browser,
-// not a datacenter fetch — read the CSV text from the rendered
-// page, and import it into IndexedDB, stored until expiry like
-// every other import. If the page is a bot check instead of a
-// CSV, that is reported as blocked, never guessed. The tab is
-// always closed afterwards. Returns { rows, year, via } or
-// { error, year }.
+// fetch is blocked): open the SJR home page in a background tab
+// in the USER's browser — Cloudflare's managed challenge clears
+// for a real browser, and the clearance cookie is set — then
+// re-fetch the CSV from the worker WITH cookies included, so the
+// clearance is sent. The old version read document.body.innerText
+// from a tab opened on the CSV URL itself, which cannot work:
+// a CSV URL triggers a file download in Chrome, so the tab has
+// no text to read. The tab is always closed afterwards, and no
+// file is downloaded into the user's Downloads folder. The
+// imported data is stored until expiry like every other import.
+// Returns { rows, year, via } or { error, year }.
 async function fetchSjrViaTab(year) {
-  const urls = [FREE.sjrExportUrl(year), FREE.sjrExportUrlAlt(year)];
-  for (const url of urls) {
-    let tabId = null;
-    try {
-      const tab = await chrome.tabs.create({ url, active: false });
-      tabId = tab.id;
-      const loaded = await new Promise((resolve) => {
-        let done = false;
-        const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, 60000);
-        const listener = (id, info) => {
-          if (id === tabId && info.status === "complete" && !done) {
-            done = true;
-            clearTimeout(timer);
-            chrome.tabs.onUpdated.removeListener(listener);
-            resolve(true);
-          }
-        };
-        chrome.tabs.onUpdated.addListener(listener);
-      });
-      if (!loaded) return { error: "timeout", year };
-      const results = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: () => (document.body ? document.body.innerText : ""),
-      });
-      const text = results && results[0] && results[0].result;
-      if (!text) continue; // blank page: try the alternate URL spelling
-      if (FREE.looksBlocked(text, 200)) return { error: "blocked", year };
-      if (!FREE.isSjrCsv(text)) continue; // not a CSV: try the alternate spelling
-      const done = await importSjrText(text, year);
-      if (!done.rows) return { error: "not-csv", year };
-      return { rows: done.rows, skipped: done.skipped, year, via: "browser-download" };
-    } catch (err) {
-      return { error: "failed", year, detail: String(err && err.message || err) };
-    } finally {
-      if (tabId !== null && chrome.tabs && chrome.tabs.remove) {
-        try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ }
-      }
+  let tabId = null;
+  try {
+    const tab = await chrome.tabs.create({ url: FREE.sjrHomeUrl, active: false });
+    tabId = tab.id;
+    // Wait for the page (and the Cloudflare challenge, if any)
+    // to finish, then give the challenge a few more seconds.
+    await waitForTabLoad(tabId, 30000);
+    await sleepMs(6000);
+  } catch (err) {
+    // No tab (or it failed to load): the worker fetch below
+    // still runs with whatever cookies exist; it just may fail.
+  } finally {
+    if (tabId !== null && chrome.tabs && chrome.tabs.remove) {
+      try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ }
     }
   }
-  return { error: "not-csv", year };
+  const fetched = await fetchSjrYear(year);
+  if (fetched.error) return { error: fetched.error === "blocked" ? "blocked" : "not-csv", year };
+  try {
+    const done = await importSjrText(fetched.text, year);
+    if (!done.rows) return { error: "not-csv", year };
+    return { rows: done.rows, skipped: done.skipped, year, via: "browser-download" };
+  } catch (err) {
+    return { error: "failed", year, detail: String(err && err.message || err) };
+  }
 }
 
 // "Check this page": read the DOI from the live DOM of the article

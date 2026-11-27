@@ -23,11 +23,11 @@ main { max-width: 452px; margin: 0 auto; padding: 14px 16px 12px; }
 /* Header */
 .brand { display: flex; gap: 12px; align-items: center; margin-bottom: 13px; }
 .logo { width: 64px; height: 64px; border-radius: 10px; flex-shrink: 0; }
-h1 { font-size: 17px; line-height: 1.2; margin: 0; color: #12324f; letter-spacing: -0.01em; }
+h1 { font-size: 17px; line-height: 1.2; margin: 0; color: #571B1B; letter-spacing: -0.01em; }
 .tag { margin: 2px 0 0; color: #5b6b7a; font-size: 12px; line-height: 1.4; }
 
 /* Form */
-label { display: block; font-weight: 600; font-size: 13px; color: #12324f; margin-bottom: 4px; }
+label { display: block; font-weight: 600; font-size: 13px; color: #571B1B; margin-bottom: 4px; }
 input {
   width: 100%;
   padding: 9px 11px;
@@ -39,13 +39,18 @@ input {
   outline: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-input:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18); }
+input:focus { border-color: #FF5A1F; box-shadow: 0 0 0 3px rgba(255, 90, 31, 0.18); }
 input:hover { border-color: #9fb0c0; }
 input::placeholder { color: #8a97a5; }
 /* Checkbox toggle (e.g. "Auto-fetch free data"): inline, not the
    full-width text-input style. */
 .toggle { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; margin: 10px 0 0; }
-.toggle input { width: auto; padding: 0; accent-color: #0f766e; }
+.toggle input { width: auto; padding: 0; accent-color: #FF5A1F; }
+/* Flame Q brand palette: flame orange #FF5A1F, flame top
+   #FF9500, flame base #FF2D55, tile top #571B1B, tile base
+   #170707. Primary buttons are flame; the upload button is the
+   main action, so it gets the full flame gradient, taller, and
+   a stronger shadow. */
 #lookup {
   margin-top: 9px;
   width: 100%;
@@ -54,20 +59,20 @@ input::placeholder { color: #8a97a5; }
   font-size: 14px;
   font-weight: 600;
   color: #fff;
-  background: #0f766e;
+  background: linear-gradient(135deg, #FF9500, #FF5A1F 55%, #FF2D55);
   border: none;
   border-radius: 8px;
   cursor: pointer;
-  box-shadow: 0 1px 3px rgba(18, 50, 79, 0.25);
+  box-shadow: 0 1px 3px rgba(87, 27, 27, 0.25);
 }
-#lookup:hover { background: #0b5e57; }
+#lookup:hover { filter: brightness(0.94); }
 #lookup:disabled { opacity: 0.65; cursor: wait; }
 .form-row { display: block; }
 .hint { margin: 7px 0 0; color: #5b6b7a; font-size: 12px; }
 
 /* Status / errors */
 .status { margin-top: 10px; font-size: 13px; color: #5b6b7a; }
-.status.loading { color: #0b5e57; }
+.status.loading { color: #D9480F; }
 .status.error {
   color: #9b1c1c;
   background: #fdf0f0;
@@ -85,7 +90,7 @@ input::placeholder { color: #8a97a5; }
   border: 1px solid #dbe4ec;
   border-radius: 10px;
   padding: 12px 13px;
-  box-shadow: 0 1px 4px rgba(18, 50, 79, 0.08);
+  box-shadow: 0 1px 4px rgba(87, 27, 27, 0.08);
 }
 .source {
   display: inline-block;
@@ -94,8 +99,8 @@ input::placeholder { color: #8a97a5; }
   letter-spacing: 0.02em;
   padding: 3px 9px;
   border-radius: 999px;
-  background: #e0f2ef;
-  color: #0b5e57;
+  background: #FFE9DE;
+  color: #D9480F;
   margin-bottom: 10px;
 }
 .source.openalex { background: #fdf3d7; color: #7a5b00; }
@@ -103,9 +108,9 @@ input::placeholder { color: #8a97a5; }
 .result dt { font-weight: 600; color: #5b6b7a; font-size: 12px; padding-top: 1px; }
 .result dd { margin: 0; overflow-wrap: anywhere; }
 /* Hierarchy: title is the clear headline, journal second, the rest plain. */
-.result dd:nth-of-type(1) { font-size: 14px; font-weight: 700; line-height: 1.35; color: #12324f; }
-.result dd:nth-of-type(2) { font-style: italic; color: #12324f; }
-.result a { color: #0f766e; text-decoration: none; }
+.result dd:nth-of-type(1) { font-size: 14px; font-weight: 700; line-height: 1.35; color: #571B1B; }
+.result dd:nth-of-type(2) { font-style: italic; color: #571B1B; }
+.result a { color: #FF5A1F; text-decoration: none; }
 .result a:hover { text-decoration: underline; }
 
 .foot { margin-top: 12px; color: #8a97a5; font-size: 11.5px; text-align: center; }
@@ -115,70 +120,70 @@ input::placeholder { color: #8a97a5; }
    clear groups (single article / batch / imports) instead of one
    long run of controls. */
 main > section + section { border-top: 1px solid #e6ebf0; padding-top: 2px; }
-h2 { font-size: 15px; line-height: 1.3; margin: 22px 0 4px; color: #12324f; letter-spacing: -0.01em; }
+h2 { font-size: 15px; line-height: 1.3; margin: 22px 0 4px; color: #571B1B; letter-spacing: -0.01em; }
 h2:first-of-type { margin-top: 14px; }
-h3 { font-size: 13.5px; margin: 18px 0 4px; color: #12324f; }
+h3 { font-size: 13.5px; margin: 18px 0 4px; color: #571B1B; }
 .section-desc { margin: 4px 0 10px; color: #5b6b7a; font-size: 12.5px; }
 .mode-desc { margin: 8px 0 8px; color: #5b6b7a; font-size: 12.5px; }
 .mode-desc code { background: #eef2f5; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 .mode-tabs { display: flex; gap: 6px; margin-top: 10px; }
 .mode-tab {
   flex: 1; min-height: 40px; padding: 10px 6px; font-size: 12.5px; font-weight: 600;
-  color: #0f766e; background: #fff; border: 1px solid #b9d6d2;
+  color: #FF5A1F; background: #fff; border: 1px solid #FFC9A8;
   border-radius: 8px; cursor: pointer;
 }
-.mode-tab.active { background: #0f766e; color: #fff; border-color: #0f766e; }
+.mode-tab.active { background: #FF5A1F; color: #fff; border-color: #FF5A1F; }
 .mode-pane { margin-top: 4px; }
 .mode-pane label { margin-top: 8px; }
 .two-col { display: flex; gap: 10px; }
 .two-col > div { flex: 1; min-width: 0; }
 .primary {
   margin-top: 10px; width: 100%; min-height: 42px; padding: 10px; font-size: 14px; font-weight: 600;
-  color: #fff; background: #0f766e; border: none; border-radius: 8px; cursor: pointer;
-  box-shadow: 0 1px 3px rgba(18, 50, 79, 0.25);
+  color: #fff; background: linear-gradient(135deg, #FF9500, #FF5A1F 55%, #FF2D55); border: none; border-radius: 8px; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(87, 27, 27, 0.25);
 }
-.primary:hover { background: #0b5e57; }
+.primary:hover { filter: brightness(0.94); }
 .primary:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
 /* The upload button is the main action of the batch section, so
-   it stands out: navy (the brand colour), taller, stronger
-   shadow. Every other primary button stays teal. */
+   it stands out: full flame gradient, taller, stronger shadow.
+   Every other primary button shares the same flame gradient. */
 #batch-run {
-  background: #12324f;
+  background: linear-gradient(135deg, #FF9500, #FF5A1F 55%, #FF2D55);
   min-height: 46px;
   font-size: 15px;
-  box-shadow: 0 2px 6px rgba(18, 50, 79, 0.35);
+  box-shadow: 0 2px 6px rgba(87, 27, 27, 0.35);
 }
-#batch-run:hover { background: #0d2438; }
+#batch-run:hover { filter: brightness(0.94); }
 #batch-run:disabled { opacity: 0.55; box-shadow: none; }
 select {
   width: 100%; padding: 9px 11px; font-size: 13.5px; color: #1b2a3a;
   background: #fff; border: 1px solid #c3cfda; border-radius: 8px; outline: none;
 }
-select:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18); }
+select:focus { border-color: #FF5A1F; box-shadow: 0 0 0 3px rgba(255, 90, 31, 0.18); }
 /* File-choose buttons: real buttons, same height and weight
    everywhere, so every "Choose …" reads as one tap target. */
 .file-label {
   display: inline-flex; align-items: center; min-height: 36px; padding: 8px 16px; font-size: 13px; font-weight: 600;
-  color: #0f766e; background: #fff; border: 1px solid #b9d6d2;
+  color: #FF5A1F; background: #fff; border: 1px solid #FFC9A8;
   border-radius: 999px; cursor: pointer; margin: 0;
 }
-.file-label:hover { background: #e0f2ef; }
+.file-label:hover { background: #FFE9DE; }
 .file-name { font-size: 12.5px; color: #5b6b7a; margin-left: 8px; }
 .batch-controls { margin-top: 8px; }
 .button-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .button-row .primary { width: auto; flex: 1; margin-top: 0; min-width: 200px; }
 .button-row .ghost { margin: 0; flex: 1; min-width: 200px; }
 .progress { margin-top: 10px; height: 8px; background: #dbe4ec; border-radius: 999px; overflow: hidden; }
-.progress-bar { height: 100%; width: 0; background: #0f766e; transition: width 0.2s ease; }
+.progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, #FF9500, #FF5A1F 55%, #FF2D55); transition: width 0.2s ease; }
 .batch-table-wrap { margin-top: 12px; overflow-x: auto; }
 .batch-table { width: 100%; border-collapse: collapse; font-size: 12.5px; background: #fff; }
 .batch-table th, .batch-table td { border: 1px solid #dbe4ec; padding: 6px 8px; text-align: left; vertical-align: top; }
-.batch-table th { background: #eef2f5; color: #12324f; font-size: 12px; }
+.batch-table th { background: #eef2f5; color: #571B1B; font-size: 12px; }
 .batch-table td { overflow-wrap: anywhere; }
 /* Zebra rows: a long results list stays scannable at a glance. */
 .batch-table tbody tr:nth-child(even) td { background: #f7f9fb; }
 #batch-download { margin-top: 10px; }
-.source.jcr { background: #e0f2ef; color: #0b5e57; }
+.source.jcr { background: #FFE9DE; color: #D9480F; }
 .source.sjr { background: #fdf3d7; color: #7a5b00; }
 .source.none { background: #f0f0f0; color: #5b6b7a; }
 .ghost.danger { color: #9b1c1c; border-color: #f3c2c2; }
@@ -191,13 +196,13 @@ select:focus { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, 0
   padding: 8px 14px;
   font-size: 12.5px;
   font-weight: 600;
-  color: #0f766e;
+  color: #FF5A1F;
   background: transparent;
-  border: 1px solid #b9d6d2;
+  border: 1px solid #FFC9A8;
   border-radius: 999px;
   cursor: pointer;
 }
-.ghost:hover { background: #e0f2ef; }
+.ghost:hover { background: #FFE9DE; }
 #check-page { margin-top: 10px; }
 
 /* Wide view: full browser tab. Same page, same markup — the layout
