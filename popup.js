@@ -38,9 +38,6 @@ const batchRunBtn = document.getElementById("batch-run");
 const batchTestsetBtn = document.getElementById("batch-testset");
 const batchStatusEl = document.getElementById("batch-status");
 const batchSjrStatusEl = document.getElementById("batch-sjr-status");
-// TEMPORARY (28 Nov 2026, for testing): per-year SJR timer
-// list under the status area, removed after the diagnosis.
-const batchSjrYearsEl = document.getElementById("batch-sjr-years");
 const batchProgressEl = document.getElementById("batch-progress");
 const batchProgressBarEl = document.getElementById("batch-progress-bar");
 const batchResultsEl = document.getElementById("batch-results");
@@ -150,22 +147,13 @@ async function isSjrClearanceFresh() {
 // Concurrent calls for the same year share one fetch.
 async function ensureSjrYear(year) {
   const y = parseInt(year, 10);
-  const enteredAt = Date.now();
   if (!y) return { state: "invalid", year: y };
   if (y > sjrLatestYear()) return { state: "not-released", year: y };
   try {
     const meta = await getStore().getMeta();
-    // Already stored: a cache hit, so the timer is the store
-    // check itself, which reads as 0s.
-    if (DATA.sjrFilesCoverYear(meta, y)) return { state: "ready", year: y, seconds: DATA.sjrElapsedSec(enteredAt, Date.now()) };
+    if (DATA.sjrFilesCoverYear(meta, y)) return { state: "ready", year: y };
   } catch (err) { /* fall through and try the fetch */ }
   if (sjrFetchInFlight.has(y)) return sjrFetchInFlight.get(y);
-  // Per-year fetch timer (28 Nov 2026, for testing): the clock
-  // starts when this year's fetch begins and stops when its
-  // rows are stored, so the batch tag shows where the seconds
-  // go ("SJR 2017 saved, 41,551 rows, 14s").
-  const fetchStartedAt = Date.now();
-  const timed = (o) => { o.seconds = DATA.sjrElapsedSec(fetchStartedAt, Date.now()); return o; };
   const run = (async () => {
     let res = null;
     if (!(await isSjrClearanceFresh())) {
@@ -173,7 +161,7 @@ async function ensureSjrYear(year) {
     }
     if (res && res.rows) {
       refreshImportStatus();
-      return timed({ state: "fetched", year: y, rows: res.rows, timing: res.timing });
+      return { state: "fetched", year: y, rows: res.rows };
     }
     if (!res || (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
       // Tab budget 180s: background tab (load <= 20s + poll
@@ -186,7 +174,7 @@ async function ensureSjrYear(year) {
       res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 180000);
       if (res && res.rows) {
         refreshImportStatus();
-        return timed({ state: "fetched", year: y, rows: res.rows, timing: res.timing });
+        return { state: "fetched", year: y, rows: res.rows };
       }
       // The message may have timed out while the worker kept
       // going and stored the file late: re-check the store
@@ -196,13 +184,19 @@ async function ensureSjrYear(year) {
         const meta2 = await getStore().getMeta();
         if (DATA.sjrFilesCoverYear(meta2, y)) {
           refreshImportStatus();
-          return timed({ state: "fetched", year: y, rows: meta2.sjrRows });
+          // The year's own rows, not the store total across all
+          // saved years (28 Nov 2026: the late-store line used
+          // to report the total, e.g. 538,583 rows, as this
+          // year's rows — same fix as the Get free SJR data
+          // button's late-store line).
+          const file2 = meta2.sjrFiles.find((f) => DATA.sjrFileYear(f) === y);
+          return { state: "fetched", year: y, rows: file2 ? file2.rows : 0 };
         }
       } catch (err) { /* fall through to blocked */ }
-      if (res && res.error === "challenge") return timed({ state: "challenge", year: y, detail: res.detail || "" });
-      return timed({ state: "blocked", year: y, detail: res && res.detail ? res.detail : "" });
+      if (res && res.error === "challenge") return { state: "challenge", year: y, detail: res.detail || "" };
+      return { state: "blocked", year: y, detail: res && res.detail ? res.detail : "" };
     }
-    return timed({ state: "failed", year: y });
+    return { state: "failed", year: y };
   })();
   sjrFetchInFlight.set(y, run);
   try { return await run; } finally { sjrFetchInFlight.delete(y); }
@@ -428,7 +422,7 @@ async function showResult(data, sourceName, opts) {
     if (ensured.state === "fetched" || ensured.state === "ready") {
       rank = await safeGetRank(data.issns, parseInt(data.year, 10));
       if (ensured.state === "fetched" && statusEl) {
-        statusEl.textContent = DATA.sjrOutcomeText("fetched", data.year, ensured.rows, ensured.detail, ensured.seconds, ensured.timing);
+        statusEl.textContent = "SJR data saved for " + data.year + ".";
       }
     } else if (ensured.state === "not-released" || ensured.state === "blocked" || ensured.state === "challenge") {
       sjrNote = ensured.state === "not-released" ? "not-released" : "blocked";
@@ -656,7 +650,7 @@ async function fetchArticleByDoi(doi) {
     } catch (err) { if (err && err.status === 404) saw404 = true; else sawOther = true; }
     return { notFound: true, reason: (!sawOther && saw404) ? "no-record" : "network" };
   };
-  if (articleCache) return articleCache.getOrFetch("doi:" + doi.toLowerCase(), run);
+  if (articleCache) return articleCache.getOrFetch("doi:" + doi.toLowerCase(), run, (v) => !(v && v.notFound));
   return run();
 }
 
@@ -722,7 +716,7 @@ async function fetchArticleByTitle(title, journal, year) {
   } catch (err) { /* not found */ }
   return { notFound: true, reason: "no-title-match", bestOverlap, bestTitle: bestTitle ? bestTitle.slice(0, 60) : "" };
   };
-  if (articleCache) return articleCache.getOrFetch(key, run);
+  if (articleCache) return articleCache.getOrFetch(key, run, (v) => !(v && v.notFound));
   return run();
 }
 
@@ -1058,14 +1052,7 @@ function refreshImportStatus() {
     } else {
       jcrStatusEl.textContent = "No JCR data imported yet.";
     }
-    const sjrFile = latestFile(meta.sjrFiles);
-    if (meta.sjrRows && sjrFile && sjrFile.importedAt) {
-      sjrStatusEl.textContent = `SJR data: ${meta.sjrRows} rows (fallback only, never shown as JCR). ${DATA.validUntilText(sjrFile.importedAt, "sjr")}.`;
-    } else if (meta.sjrRows) {
-      sjrStatusEl.textContent = `SJR data: ${meta.sjrRows} rows (fallback only, never shown as JCR).`;
-    } else {
-      sjrStatusEl.textContent = "No SJR data imported yet.";
-    }
+    sjrStatusEl.textContent = DATA.sjrStatusText(meta);
     // Auto-saved categories (per-article checks) are not a list
     // file: the status says which one it was — "40 journals
     // stored automatically (per-article checks)" instead of
@@ -1386,7 +1373,10 @@ if (sjrFetchBtn) {
           const meta2 = await getStore().getMeta();
           if (DATA.sjrFilesCoverYear(meta2, year)) {
             const file2 = meta2.sjrFiles.find((f) => DATA.sjrFileYear(f) === year);
-            sjrStatusEl.textContent = `SJR data: ${meta2.sjrRows} rows for ${year}, saved from the browser download. ${DATA.validUntilText(file2.importedAt, "sjr")}.`;
+            // The year's own rows, not the total across all saved
+            // years (28 Nov 2026: this line used to report the
+            // store total, e.g. 538,583 rows, as "rows for 2017").
+            sjrStatusEl.textContent = `SJR data: ${file2.rows} rows for ${year}, saved from the browser download. ${DATA.validUntilText(file2.importedAt, "sjr")}.`;
             sjrStatusEl.classList.remove("error");
             refreshImportStatus();
             return;
@@ -1471,10 +1461,10 @@ clearDataBtn.addEventListener("click", async () => {
 // over. The saved state is validated by DATA.batchResumePoint
 // (rows + results must agree), and cleared when the batch
 // finishes. Batch data never lives only in a global.
-function saveBatchState(rows, results, nextIndex) {
+function saveBatchState(rows, results, nextIndex, elapsedMs) {
   if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
   try {
-    chrome.storage.local.set({ batchState: { rows: rows, results: results, nextIndex: nextIndex, savedAt: new Date().toISOString() } });
+    chrome.storage.local.set({ batchState: { rows: rows, results: results, nextIndex: nextIndex, elapsedMs: elapsedMs || 0, savedAt: new Date().toISOString() } });
   } catch (err) { /* storage unavailable: the batch still runs, resume just will not be offered */ }
 }
 function clearBatchState() {
@@ -1523,7 +1513,7 @@ async function resumeSavedBatch() {
   if (batchResumeBtn) batchResumeBtn.hidden = true;
   pendingBatchState = null;
   batchStatusEl.textContent = `Resuming batch at article ${args.startIndex + 1} of ${args.saved.rows.length}…`;
-  await runBatch(args.saved.rows, { startIndex: args.startIndex, existingResults: args.existingResults });
+  await runBatch(args.saved.rows, { startIndex: args.startIndex, existingResults: args.existingResults, elapsedMs: args.saved.elapsedMs || 0 });
   return true;
 }
 
@@ -1568,21 +1558,22 @@ batchFileEl.addEventListener("change", async () => {
   const file = batchFileEl.files && batchFileEl.files[0];
   batchFileNameEl.textContent = file ? file.name : "No file chosen.";
   batchRunBtn.disabled = !file;
-  // Keep the saved batch until the new file is read: if the
-  // new rows match the saved batch, the resume offer survives
-  // (28 Nov 2026 — choosing the same file again used to wipe
-  // it). A different file replaces it, and the status says so.
+  // The saved batch survives until a valid file replaces it:
+  // a wrong file, a read error, clearing the picker, or a
+  // file with no usable rows must NOT wipe the resume point
+  // (28 Nov 2026: picking a wrong file by mistake used to
+  // destroy the saved batch for good). The saved batch is
+  // cleared only by a valid different file, and the status
+  // says so.
   const previousSaved = pendingBatchState;
   batchFileRows = null;
-  pendingBatchState = null;
   if (batchResumeBtn) batchResumeBtn.hidden = true;
-  if (!file) { clearBatchState(); updateBatchRunButton(); return; }
+  if (!file) { updateBatchRunButton(); return; }
   const typeError = wrongTypeMessage(file, ARTICLE_FILE_TYPES, "the article list");
   if (typeError) {
     batchStatusEl.textContent = typeError;
     batchStatusEl.classList.add("error");
     batchRunBtn.disabled = true;
-    clearBatchState();
     updateBatchRunButton();
     return;
   }
@@ -1595,24 +1586,24 @@ batchFileEl.addEventListener("change", async () => {
       if (batchResumeBtn) batchResumeBtn.hidden = false;
       const next = DATA.batchResumePoint(previousSaved);
       batchStatusEl.textContent = `${parsed.rows.length} article(s) in ${file.name}. Saved batch matches this file — press “Resume batch, from article ${next + 1} of ${parsed.rows.length}” to continue.`;
-    } else {
+    } else if (parsed.rows.length) {
+      // A valid file replaces the saved batch; a file with no
+      // usable rows leaves it alone (see the note above).
+      pendingBatchState = null;
       if (previousSaved) {
         clearBatchState();
-        batchStatusEl.textContent = parsed.rows.length
-          ? `${parsed.rows.length} article(s) in ${file.name}. Different file from the saved batch — starting fresh. Press “Upload and check all articles”.`
-          : `No articles found in ${file.name}. ${parsed.warnings.join(" ")} Check the columns: title, journal, year, DOI.`;
+        batchStatusEl.textContent = `${parsed.rows.length} article(s) in ${file.name}. Different file from the saved batch — starting fresh. Press “Upload and check all articles”.`;
       } else {
-        batchStatusEl.textContent = parsed.rows.length
-          ? `${parsed.rows.length} article(s) in ${file.name}. Press “Upload and check all articles”.`
-          : `No articles found in ${file.name}. ${parsed.warnings.join(" ")} Check the columns: title, journal, year, DOI.`;
+        batchStatusEl.textContent = `${parsed.rows.length} article(s) in ${file.name}. Press “Upload and check all articles”.`;
       }
+    } else {
+      batchStatusEl.textContent = `No articles found in ${file.name}. ${parsed.warnings.join(" ")} Check the columns: title, journal, year, DOI.`;
     }
     batchStatusEl.classList.toggle("error", !parsed.rows.length);
     updateBatchRunButton();
   } catch (err) {
     batchStatusEl.textContent = `Could not read ${file.name}: ${err.message}`;
     batchStatusEl.classList.add("error");
-    clearBatchState();
     updateBatchRunButton();
   }
 });
@@ -1654,14 +1645,11 @@ function batchRowToResult(row, found, rank, note, sjrState) {
 // Single SJR tag under the batch status: ONE label that is
 // replaced each time a year's data resolves — never a paragraph
 // listing every saved year (user, 27 Nov 2026). The tag lives
-// in the status area only, never in the article results.
-// TEMPORARY (28 Nov 2026, for testing): the per-year list
-// under it shows every year's line, so no year's time scrolls
-// past unseen. The list is removed after the diagnosis; the
-// single tag stays.
+// in the status area only, never in the article results. It
+// shows only the plain outcome, no seconds: the per-year timer
+// was removed 28 Nov 2026, once the diagnosis was done.
 function updateBatchSjrStatus(outcomes) {
-  if (batchSjrStatusEl) batchSjrStatusEl.textContent = DATA.sjrLatestOutcomeText(outcomes);
-  if (batchSjrYearsEl) batchSjrYearsEl.textContent = DATA.sjrYearListText(outcomes);
+  if (batchSjrStatusEl) batchSjrStatusEl.textContent = DATA.sjrLatestPlainOutcomeText(outcomes);
 }
 
 async function runBatch(rows, opts) {
@@ -1690,7 +1678,6 @@ async function runBatch(rows, opts) {
   if (batchMjlBtn) batchMjlBtn.hidden = true;
   if (batchMjlNoteEl) batchMjlNoteEl.textContent = "";
   if (batchSjrStatusEl) batchSjrStatusEl.textContent = "";
-  if (batchSjrYearsEl) batchSjrYearsEl.textContent = ""; // TEMPORARY list, cleared per run
   batchRunBtn.disabled = true;
   batchTestsetBtn.disabled = true;
   let resolvedDoi = 0, found = 0;
@@ -1715,15 +1702,6 @@ async function runBatch(rows, opts) {
   const prefetchNext = () => {
     if (prefetchIdx >= batchYears.length) return Promise.resolve();
     const y = batchYears[prefetchIdx++];
-    // TEMPORARY (28 Nov 2026): mark the year as fetching so
-    // the tag shows "Getting SJR data for {year}…" while the
-    // 20-30s fetch runs, instead of the previous year's stale
-    // number. The outcome replaces it when the year resolves.
-    if (!sjrYearOutcomes.has(y)) {
-      sjrYearOutcomes.set(y, { state: "fetching", year: y });
-      updateBatchSjrStatus(sjrYearOutcomes);
-      saveBatchLiveState(false);
-    }
     return ensureSjrYear(y).then((o) => {
       sjrYearOutcomes.set(y, o);
       updateBatchSjrStatus(sjrYearOutcomes);
@@ -1733,16 +1711,17 @@ async function runBatch(rows, opts) {
   for (let k = 0; k < 3; k++) prefetchNext();
   let finished = false;
   let stopped = false;
-  // TEMPORARY (28 Nov 2026): per-article time — how long the
-  // previous row took (the Crossref/OpenAlex lookup per
-  // article), shown next to the article counter. Removed after
-  // the diagnosis.
-  let lastArticleSeconds = null;
+  // Batch completion time (28 Nov 2026): the clock starts when
+  // this run starts. On a resume it continues from the elapsed
+  // time already saved, so the pause between stop and resume
+  // does not count — only the time the batch actually ran.
+  const batchElapsedBaseMs = (opts && opts.elapsedMs) || 0;
+  const batchSegmentStartedAt = Date.now();
+  const batchElapsedMs = () => batchElapsedBaseMs + (Date.now() - batchSegmentStartedAt);
   try {
   for (let i = startIndex; i < rows.length; i++) {
     const row = rows[i];
-    const rowStartedAt = Date.now();
-    setBatchStatus(DATA.batchArticleStatusText(i + 1, rows.length, row.title, lastArticleSeconds));
+    setBatchStatus("Checking article " + (i + 1) + " of " + rows.length + ": " + String(row.title || "").slice(0, 60) + "…");
     batchProgressBarEl.style.width = Math.round((i / rows.length) * 100) + "%";
     saveBatchLiveState(false);
     let result;
@@ -1794,27 +1773,16 @@ async function runBatch(rows, opts) {
         // per run and skips years already stored; a year already
         // tried in this run (e.g. blocked) is NOT tried again,
         // so a blocked year does not open one SJR tab per article.
+        // DATA.resolveBatchSjrRank also awaits a year the
+        // prefetch is still fetching and re-reads the rank once
+        // it lands, instead of keeping a blank SJR for a year
+        // that was only seconds away.
         if (rank && rank.source === "none" && year) {
-          let ensured;
-          if (sjrYearOutcomes.has(year)) {
-            ensured = sjrYearOutcomes.get(year);
-          } else {
-            setBatchStatus(`Checking article ${i + 1} of ${rows.length}: getting SJR data for ${year}…`);
-            // TEMPORARY (28 Nov 2026): mark the year as fetching
-            // so the tag shows "Getting SJR data for {year}…"
-            // while the fetch runs.
-            sjrYearOutcomes.set(year, { state: "fetching", year });
-            updateBatchSjrStatus(sjrYearOutcomes);
-            saveBatchLiveState(false);
-            ensured = await ensureSjrYear(year);
-            sjrYearOutcomes.set(year, ensured);
-            updateBatchSjrStatus(sjrYearOutcomes);
-            saveBatchLiveState(false);
-          }
-          sjrState = ensured.state;
-          if (ensured.state === "fetched") {
-            rank = await safeGetRank(issns, year);
-          }
+          const resolved = await DATA.resolveBatchSjrRank(safeGetRank, ensureSjrYear, sjrYearOutcomes, issns, year, rank);
+          rank = resolved.rank;
+          sjrState = resolved.sjrState;
+          updateBatchSjrStatus(sjrYearOutcomes);
+          saveBatchLiveState(false);
         }
         let note = article.resolvedBy || "Found by DOI";
         const doiKey = (article.data.doi || "").toLowerCase();
@@ -1837,15 +1805,14 @@ async function runBatch(rows, opts) {
       result = batchRowToResult(row, null, null, "Network error: " + String(err.message || err));
       result.notFoundKind = "network";
     }
-    // TEMPORARY (28 Nov 2026): per-article time, stopped here
-    // so the 500 ms polite pacing below does not count.
-    lastArticleSeconds = DATA.sjrElapsedSec(rowStartedAt, Date.now());
     batchResults.push(result);
     // Persist after every row: if the panel closes, the tab
     // reloads, or the browser restarts, the rows already checked
     // survive in chrome.storage.local and the batch can resume
-    // from the next row instead of starting over.
-    saveBatchState(rows, batchResults, i + 1);
+    // from the next row instead of starting over. The elapsed
+    // time rides along, so a resumed batch's completion line
+    // counts the whole batch, not just the last run.
+    saveBatchState(rows, batchResults, i + 1, batchElapsedMs());
     // No table row: the panel just counts — "12 of 65 articles
     // done" — and the per-row results live only in the CSV.
     setBatchStatus(`${i + 1} of ${rows.length} articles done`);
@@ -1861,9 +1828,18 @@ async function runBatch(rows, opts) {
   if (!finished) {
     // The loop stopped early (unexpected error outside a row):
     // results are incomplete, so the download stays hidden.
+    // The rows already checked are still saved: offer the
+    // resume again, or the Run button would restart from
+    // article 1 and wipe them (28 Nov 2026).
     setBatchStatus("Batch stopped early — results are incomplete, download is hidden.");
     saveBatchLiveState(true);
     sendSweepTabs();
+    if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get("batchState", (result) => {
+        const saved = result && result.batchState;
+        if (saved) offerBatchResume(saved);
+      });
+    }
     updateBatchRunButton();
     return;
   }
@@ -1895,13 +1871,15 @@ async function runBatch(rows, opts) {
     batchProgressBarEl.style.width = Math.round((batchResults.length / rows.length) * 100) + "%";
     batchDownloadBtn.hidden = false;
     updateBatchMjlButton();
-    setBatchStatus(stoppedPrefix + " " + DATA.wosPassText(wosStopped) + " Resume to continue from where it stopped.");
+    // The stopped line carries the time the batch actually ran
+    // (28 Nov 2026), matching the finished completion line.
+    setBatchStatus(`Batch stopped at ${batchResults.length} of ${rows.length} articles in ${DATA.formatBatchDuration(batchElapsedMs())} — results are partial. ` + DATA.wosPassText(wosStopped) + " Resume to continue from where it stopped.");
     // The Import section must show what the pass actually
     // saved, not the text from when the panel opened.
     refreshImportStatus();
     saveBatchLiveState(true);
     sendSweepTabs();
-    pendingBatchState = { rows: rows, results: batchResults.slice(), nextIndex: batchResults.length, savedAt: new Date().toISOString() };
+    pendingBatchState = { rows: rows, results: batchResults.slice(), nextIndex: batchResults.length, elapsedMs: batchElapsedMs(), savedAt: new Date().toISOString() };
     if (batchResumeBtn) batchResumeBtn.hidden = false;
     updateBatchRunButton();
     saveBatchLiveState(true);
@@ -1945,7 +1923,10 @@ async function runBatch(rows, opts) {
   batchProgressBarEl.style.width = "100%";
   batchDownloadBtn.hidden = false;
   updateBatchMjlButton();
-  setBatchStatus(batchSummary + " " + DATA.wosPassText(wos));
+  // One plain completion line (28 Nov 2026, user's word):
+  // how many articles, in how much time. This is the only
+  // time shown anywhere in the panel.
+  setBatchStatus(batchSummary + " " + DATA.wosPassText(wos) + ` Completed ${rows.length} articles in ${DATA.formatBatchDuration(batchElapsedMs())}.`);
   // The Import section must show what the pass actually saved,
   // not the text from when the panel opened (the "not saved"
   // report, 28 Nov 2026: the rows WERE in the store, the
@@ -1971,7 +1952,6 @@ function buildCurrentBatchLiveState(finished) {
   return DATA.buildBatchLiveState({
     status: batchStatusEl ? batchStatusEl.textContent : "",
     sjrTag: batchSjrStatusEl ? batchSjrStatusEl.textContent : "",
-    sjrYears: batchSjrYearsEl ? batchSjrYearsEl.textContent : "",
     mjlNote: batchMjlNoteEl ? batchMjlNoteEl.textContent : "",
     progressPct: batchProgressBarEl ? parseFloat(batchProgressBarEl.style.width) || 0 : 0,
     resultsHidden: batchResultsEl ? !!batchResultsEl.hidden : true,
@@ -2001,7 +1981,6 @@ function renderBatchLiveState(state) {
   if (!state) return;
   if (batchStatusEl && typeof state.status === "string") batchStatusEl.textContent = state.status;
   if (batchSjrStatusEl && typeof state.sjrTag === "string") batchSjrStatusEl.textContent = state.sjrTag;
-  if (batchSjrYearsEl && typeof state.sjrYears === "string") batchSjrYearsEl.textContent = state.sjrYears;
   if (batchMjlNoteEl && typeof state.mjlNote === "string") batchMjlNoteEl.textContent = state.mjlNote;
   if (batchProgressBarEl && typeof state.progressPct === "number") batchProgressBarEl.style.width = state.progressPct + "%";
   if (batchResultsEl) batchResultsEl.hidden = !!state.resultsHidden;

@@ -96,15 +96,21 @@ class ArticleCache {
     }
   }
 
-  async getOrFetch(key, fetchFn) {
+  async getOrFetch(key, fetchFn, shouldCache) {
     const hit = this.get(key);
     if (hit !== undefined) return hit;
     if (this.pending.has(key)) return this.pending.get(key);
+    // shouldCache, when given, decides whether a resolved value
+    // is worth storing: a failed article lookup (not found /
+    // network) must NOT be cached, or a retry in the same
+    // session returns the cached failure without re-fetching
+    // (28 Nov 2026). A found article is stable and is cached.
+    const cacheable = typeof shouldCache === "function" ? shouldCache : () => true;
     const promise = Promise.resolve()
       .then(fetchFn)
       .then((value) => {
         this.pending.delete(key);
-        if (value !== null && value !== undefined) this.set(key, value);
+        if (value !== null && value !== undefined && cacheable(value)) this.set(key, value);
         return value;
       })
       .catch((err) => {

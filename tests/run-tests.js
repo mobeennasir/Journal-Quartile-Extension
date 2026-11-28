@@ -396,7 +396,7 @@ async function main() {
   // Wiring in popup.js and the panel.
   check("popup.js uses net.js fetchJson", popupJs.indexOf("NET.fetchJson(url)") !== -1);
   check("popup.js caches DOI lookups", popupJs.indexOf('articleCache.getOrFetch("doi:"') !== -1);
-  check("popup.js caches title lookups", popupJs.indexOf('articleCache.getOrFetch(key, run)') !== -1);
+  check("popup.js caches title lookups", popupJs.indexOf('articleCache.getOrFetch(key, run, (v) => !(v && v.notFound))') !== -1);
   check("popup.js shows live status while checking the ranking", popupJs.indexOf("Found article. Checking ranking") !== -1);
   check("popup.js publisher fetch has a 10s timeout", popupJs.indexOf("setTimeout(() => controller.abort(), 10000)") !== -1);
   check("popup.js falls back to in-memory storage with a note", popupJs.indexOf("showStorageFallbackNote()") !== -1);
@@ -524,8 +524,8 @@ async function main() {
   check("background handles fetchMjlCategory and fetchSjrExport messages",
     bgJs.indexOf('message.type === "fetchMjlCategory"') !== -1
     && bgJs.indexOf('message.type === "fetchSjrExport"') !== -1);
-  check("manifest is 0.4.6 with MJL, SJR and DOAJ host permissions",
-    manifest.version === "0.4.6"
+  check("manifest is 0.4.7 with MJL, SJR and DOAJ host permissions",
+    manifest.version === "0.4.7"
     && manifest.host_permissions.indexOf("https://mjl.clarivate.com/*") !== -1
     && manifest.host_permissions.indexOf("https://www.scimagojr.com/*") !== -1
     && manifest.host_permissions.indexOf("https://scimagojr.com/*") !== -1
@@ -763,7 +763,7 @@ async function main() {
     popupJs.indexOf('"SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page"') !== -1);
   check("popup batch fetches each row's publication year when its rank is missing",
     popupJs.indexOf('if (rank && rank.source === "none" && year)') !== -1
-    && popupJs.indexOf("await ensureSjrYear(year)") !== -1);
+    && popupJs.indexOf("DATA.resolveBatchSjrRank(safeGetRank, ensureSjrYear, sjrYearOutcomes, issns, year, rank)") !== -1);
   // SUPERSEDED 27 Nov 2026 (user order): the finished summary no
   // longer lists the fetched SJR years — the single tag in the
   // status area shows only the latest year (see section 35).
@@ -890,21 +890,20 @@ async function main() {
     panelHtml.indexOf('id="batch-sjr-status"') !== -1
     && runBatchSrc.indexOf('if (batchSjrStatusEl) batchSjrStatusEl.textContent = ""') !== -1);
   // Per-year SJR outcomes, honest and visible.
-  check("sjrOutcomeText: ready = already saved, fetched names the row count",
-    DATA.sjrOutcomeText("ready", 2021) === "SJR 2021 already saved"
-    && DATA.sjrOutcomeText("fetched", 2021, 51835) === "SJR 2021 saved, 51,835 rows");
-  check("sjrOutcomeText: blocked/challenge/failed say plainly the auto-download failed and name both manual buttons",
-    DATA.sjrOutcomeText("blocked", 2021) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page"
-    && DATA.sjrOutcomeText("challenge", 2021) === DATA.sjrOutcomeText("blocked", 2021)
-    && DATA.sjrOutcomeText("failed", 2021) === DATA.sjrOutcomeText("blocked", 2021));
-  check("sjrOutcomeText: not-released names the year",
-    DATA.sjrOutcomeText("not-released", 2026) === "No SJR data for 2026 yet");
+  check("sjrPlainOutcomeText: ready = from cache, fetched names the row count",
+    DATA.sjrPlainOutcomeText("ready", 2021) === "SJR 2021 from cache"
+    && DATA.sjrPlainOutcomeText("fetched", 2021, 51835) === "SJR 2021 saved, 51,835 rows");
+  check("sjrPlainOutcomeText: blocked/challenge/failed say plainly the auto-download failed and name both manual buttons",
+    DATA.sjrPlainOutcomeText("blocked", 2021) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page"
+    && DATA.sjrPlainOutcomeText("challenge", 2021) === DATA.sjrPlainOutcomeText("blocked", 2021)
+    && DATA.sjrPlainOutcomeText("failed", 2021) === DATA.sjrPlainOutcomeText("blocked", 2021));
+  check("sjrPlainOutcomeText: not-released names the year",
+    DATA.sjrPlainOutcomeText("not-released", 2026) === "No SJR data for 2026 yet");
   check("runBatch does not re-try a year already tried in this run (one SJR tab per year, not per article)",
-    runBatchSrc.indexOf("sjrYearOutcomes.has(year)") !== -1
-    && runBatchSrc.indexOf("sjrYearOutcomes.set(year, ensured)") !== -1
+    runBatchSrc.indexOf("DATA.resolveBatchSjrRank(safeGetRank, ensureSjrYear, sjrYearOutcomes, issns, year, rank)") !== -1
     && runBatchSrc.indexOf("updateBatchSjrStatus(sjrYearOutcomes)") !== -1);
   check("ensureSjrYear returns the fetched row count so the status can prove the download",
-    popupJs.indexOf('return timed({ state: "fetched", year: y, rows: res.rows, timing: res.timing })') !== -1);
+    popupJs.indexOf('return { state: "fetched", year: y, rows: res.rows };') !== -1);
   // CSV is the only per-row view: every row and every column.
   const csvResults = [
     { title: "A", journal: "J1", year: "2021", issn: "0000-0001", doi: "10.1/a", rank: { source: "JCR", quartile: "Q2", jif: 5.07, wosCategory: "W" }, note: "" },
@@ -1085,9 +1084,10 @@ async function main() {
   check("Get free SJR data button uses the same 180s tab budget and the same late-store re-check",
     popupJs.indexOf('sendBackgroundMessage({ type: "fetchSjrViaTab", year }, 180000)') !== -1
     && popupJs.indexOf("if (DATA.sjrFilesCoverYear(meta2, year)) {") !== -1);
+  const jcrJs33b = fs.readFileSync(path.join(DIR, "..", "jcr.js"), "utf8");
   check("batch still tries each distinct SJR year only once per run (dedupe untouched)",
-    popupJs.indexOf("if (sjrYearOutcomes.has(year)) {") !== -1
-    && popupJs.indexOf("sjrYearOutcomes.set(year, ensured);") !== -1);
+    jcrJs33b.indexOf("if (outcomes.has(year)) {") !== -1
+    && jcrJs33b.indexOf("outcomes.set(year, ensured);") !== -1);
   // Real-file round trip: the user's actual 2025 export, parsed
   // and stored through the same store the auto-fetch writes to.
   // 2025 lookup returns Q1; 2021 lookup returns none — never
@@ -1297,20 +1297,20 @@ async function main() {
     && DATA.sjrBlockReason("no candidate returned the CSV: timeout (https://www.scimagojr.com/journalrank.php?year=2020&out=xls)") === "SJR download timed out"
     && DATA.sjrBlockReason("no candidate returned the CSV: html (https://www.scimagojr.com/journalrank.php?year=2020&out=xls)") === "SJR returned a page, not the file"
     && DATA.sjrBlockReason("something else") === "");
-  check("sjrOutcomeText appends the short reason to a blocked year, and stays unchanged without one",
-    DATA.sjrOutcomeText("blocked", 2021, 0, "no candidate returned the CSV: wrong-year (https://x)") === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page (SJR returned another year's file)"
-    && DATA.sjrOutcomeText("blocked", 2021) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page");
+  check("sjrPlainOutcomeText appends the short reason to a blocked year, and stays unchanged without one",
+    DATA.sjrPlainOutcomeText("blocked", 2021, 0, "no candidate returned the CSV: wrong-year (https://x)") === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page (SJR returned another year's file)"
+    && DATA.sjrPlainOutcomeText("blocked", 2021) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page");
   const popupJs33 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
   check("ensureSjrYear returns the failure detail instead of a bare blocked",
-    popupJs33.indexOf('return timed({ state: "blocked", year: y, detail: res && res.detail ? res.detail : "" })') !== -1);
+    popupJs33.indexOf('return { state: "blocked", year: y, detail: res && res.detail ? res.detail : "" };') !== -1);
   check("single lookup shows the short failure reason in the SJR row",
     popupJs33.indexOf("rankingRows(data, rank, sjrNote, sjrDetail)") !== -1
     && popupJs33.indexOf("DATA.sjrBlockReason(sjrDetail)") !== -1);
   // SUPERSEDED in form 27 Nov 2026 (user order): the batch SJR
   // status is ONE tag showing only the latest year — the failure
-  // detail still rides on that tag via sjrLatestOutcomeText.
+  // detail still rides on that tag via sjrLatestPlainOutcomeText.
   check("batch SJR tag carries the failure detail for the latest year",
-    popupJs33.indexOf("DATA.sjrLatestOutcomeText(outcomes)") !== -1);
+    popupJs33.indexOf("DATA.sjrLatestPlainOutcomeText(outcomes)") !== -1);
   check("Get free SJR data names the real failure reason instead of always saying bot check",
     popupJs33.indexOf("DATA.sjrBlockReason(res.detail)") !== -1
     && popupJs33.indexOf("SJR blocked the download (bot check)") !== -1);
@@ -1329,7 +1329,7 @@ async function main() {
     DATA.batchResumePoint(null) === -1 && DATA.batchResumePoint({ rows: [1], results: [], nextIndex: 0 }) === -1);
   const popupJs34 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
   check("runBatch saves state after every row",
-    popupJs34.indexOf("saveBatchState(rows, batchResults, i + 1);") !== -1);
+    popupJs34.indexOf("saveBatchState(rows, batchResults, i + 1, batchElapsedMs())") !== -1);
   check("runBatch takes resume options and starts the loop at startIndex",
     popupJs34.indexOf("async function runBatch(rows, opts)") !== -1
     && popupJs34.indexOf("for (let i = startIndex; i < rows.length; i++)") !== -1
@@ -1358,8 +1358,8 @@ async function main() {
   check("manifest name and author are the owner's, no internal Phase label",
     manifest34.name === "Journal Quartile Extension" && manifest34.author === "Mobeen Nasir"
     && manifest34.name.indexOf("Phase") === -1 && String(manifest34.action.default_title).indexOf("Phase") === -1);
-  check("manifest is MV3, version 0.4.6, host permissions scoped",
-    manifest34.manifest_version === 3 && manifest34.version === "0.4.6"
+  check("manifest is MV3, version 0.4.7, host permissions scoped",
+    manifest34.manifest_version === 3 && manifest34.version === "0.4.7"
     && manifest34.host_permissions.indexOf("<all_urls>") === -1
     && manifest34.host_permissions.every((h) => h.indexOf("*://*/*") === -1));
   const pngSize = (file) => {
@@ -1372,8 +1372,8 @@ async function main() {
   check("side panel open trigger uses openPanelOnActionClick",
     fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8").indexOf("openPanelOnActionClick: true") !== -1);
   const readme34 = fs.readFileSync(path.join(DIR, "..", "README.md"), "utf8");
-  check("README states version 0.4.6 and has no em or en dashes",
-    readme34.indexOf("0.4.6") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
+  check("README states version 0.4.7 and has no em or en dashes",
+    readme34.indexOf("0.4.7") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
   // Security: no code execution from data, no secrets, no trackers.
   const allJs34 = ["popup.js", "background.js", "jcr.js", "shared.js", "net.js", "freedata.js"]
     .map((f) => fs.readFileSync(path.join(DIR, "..", f), "utf8")).join("\n");
@@ -1410,20 +1410,20 @@ async function main() {
     [2022, { state: "fetched", year: 2022, rows: 46790 }],
   ]);
   check("single SJR tag shows only the latest year, with its row count",
-    DATA.sjrLatestOutcomeText(outcomes35) === "SJR 2022 saved, 46,790 rows",
-    DATA.sjrLatestOutcomeText(outcomes35));
+    DATA.sjrLatestPlainOutcomeText(outcomes35) === "SJR 2022 saved, 46,790 rows",
+    DATA.sjrLatestPlainOutcomeText(outcomes35));
   check("single SJR tag never lists more than one year",
-    DATA.sjrLatestOutcomeText(outcomes35).indexOf("2021") === -1
-    && DATA.sjrLatestOutcomeText(outcomes35).indexOf("2015") === -1);
-  check("single SJR tag says already-saved for a stored year",
-    DATA.sjrLatestOutcomeText(new Map([[2023, { state: "ready", year: 2023 }]])) === "SJR 2023 already saved");
+    DATA.sjrLatestPlainOutcomeText(outcomes35).indexOf("2021") === -1
+    && DATA.sjrLatestPlainOutcomeText(outcomes35).indexOf("2015") === -1);
+  check("single SJR tag says from cache for a stored year",
+    DATA.sjrLatestPlainOutcomeText(new Map([[2023, { state: "ready", year: 2023 }]])) === "SJR 2023 from cache");
   check("single SJR tag says no data yet for an unreleased year",
-    DATA.sjrLatestOutcomeText(new Map([[2026, { state: "not-released", year: 2026 }]])) === "No SJR data for 2026 yet");
+    DATA.sjrLatestPlainOutcomeText(new Map([[2026, { state: "not-released", year: 2026 }]])) === "No SJR data for 2026 yet");
   check("single SJR tag is empty with no outcomes",
-    DATA.sjrLatestOutcomeText(new Map()) === "" && DATA.sjrLatestOutcomeText(null) === "");
+    DATA.sjrLatestPlainOutcomeText(new Map()) === "" && DATA.sjrLatestPlainOutcomeText(null) === "");
   const popupJs35 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
   check("batch SJR status uses the single tag, no joined paragraph",
-    popupJs35.indexOf("batchSjrStatusEl.textContent = DATA.sjrLatestOutcomeText(outcomes);") !== -1
+    popupJs35.indexOf("batchSjrStatusEl.textContent = DATA.sjrLatestPlainOutcomeText(outcomes);") !== -1
     && popupJs35.indexOf('lines.join("; ")') === -1);
   check("finished batch summary no longer lists the fetched SJR years",
     popupJs35.indexOf("SJR data fetched for") === -1);
@@ -1673,8 +1673,8 @@ async function main() {
     panel36.indexOf('id="hec-file"') !== -1 && panel36.indexOf('id="hec-import"') !== -1
     && panel36.indexOf('id="hec-status"') !== -1 && panel36.indexOf("Import HEC data") !== -1);
   const manifest36 = JSON.parse(fs.readFileSync(path.join(DIR, "..", "manifest.json"), "utf8"));
-  check("manifest: doaj.org host permission added, version 0.4.6",
-    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.6");
+  check("manifest: doaj.org host permission added, version 0.4.7",
+    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.7");
 
   console.log("== 37. Batch fixes: SJR ultra-fast shared tab, first-tab leak, WoS progress, full-tab progress, WoS button, saved-status, 57/40 (28 Nov 2026) ==");
   // The user ran the v0.4.3 Naqqash batch (65 articles) and
@@ -2101,111 +2101,14 @@ async function main() {
     delete global.fetchSjrCsvInTab;
   }
 
-  console.log("== 38. Per-year SJR fetch timer (28 Nov 2026) ==");
-  // The user tested v0.4.4 in real Chrome: one shared page for
-  // the whole batch, and all 11 years take almost the same time.
-  // So the timer shows the per-year fixed cost in the batch tag
-  // ("SJR 2017 saved, 41,551 rows, 14s") and a cache hit reads
-  // "SJR 2017 from cache, 0s", so the next run shows exactly
-  // where the seconds go.
-  check("sjrElapsedSec rounds to whole seconds and never goes negative",
-    DATA.sjrElapsedSec(1000, 1000) === 0
-    && DATA.sjrElapsedSec(1000, 1499) === 0
-    && DATA.sjrElapsedSec(1000, 1500) === 1
-    && DATA.sjrElapsedSec(0, 14000) === 14
-    && DATA.sjrElapsedSec(0, 14500) === 15
-    && DATA.sjrElapsedSec(5000, 1000) === 0);
-  check("sjrElapsedSec works on real Date.now-scale values (no 32-bit wrap)",
-    DATA.sjrElapsedSec(1764320000000, 1764320014000) === 14
-    && DATA.sjrElapsedSec(1764320000000, 1764320000500) === 1);
-  check("sjrOutcomeText: fetched with seconds names rows and time",
-    DATA.sjrOutcomeText("fetched", 2017, 41551, "", 14) === "SJR 2017 saved, 41,551 rows, 14s"
-    && DATA.sjrOutcomeText("fetched", 2017, 0, "", 9) === "SJR 2017 saved, 9s");
-  check("sjrOutcomeText: ready with seconds reads from cache",
-    DATA.sjrOutcomeText("ready", 2017, 0, "", 0) === "SJR 2017 from cache, 0s"
-    && DATA.sjrOutcomeText("ready", 2017, 0, "", 1) === "SJR 2017 from cache, 1s");
-  check("sjrOutcomeText: without seconds the old text is unchanged",
-    DATA.sjrOutcomeText("fetched", 2021, 51835) === "SJR 2021 saved, 51,835 rows"
-    && DATA.sjrOutcomeText("ready", 2021) === "SJR 2021 already saved");
-  check("sjrOutcomeText: a failed year does not get a time",
-    DATA.sjrOutcomeText("blocked", 2021, 0, "", 30) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page");
-  check("sjrLatestOutcomeText: latest year carries its seconds, cache hit included",
-    DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551, seconds: 14 }]])) === "SJR 2017 saved, 41,551 rows, 14s"
-    && DATA.sjrLatestOutcomeText(new Map([[2017, { state: "ready", year: 2017, seconds: 0 }]])) === "SJR 2017 from cache, 0s"
-    && DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551, seconds: 14 }], [2018, { state: "ready", year: 2018, seconds: 0 }]])) === "SJR 2018 from cache, 0s"
-    && DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551 }]])) === "SJR 2017 saved, 41,551 rows");
-  const popupJs38 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
-  check("ensureSjrYear times every fetch path and the ready cache hit",
-    popupJs38.indexOf("const fetchStartedAt = Date.now();") !== -1
-    && popupJs38.indexOf("const timed = (o) => { o.seconds = DATA.sjrElapsedSec(fetchStartedAt, Date.now()); return o; };") !== -1
-    && popupJs38.indexOf("return timed({ state: \"fetched\"") !== -1
-    && popupJs38.indexOf("return timed({ state: \"blocked\"") !== -1
-    && popupJs38.indexOf("{ state: \"ready\", year: y, seconds: DATA.sjrElapsedSec(enteredAt, Date.now()) }") !== -1);
-  check("single lookup status uses the timed outcome text",
-    popupJs38.indexOf("DATA.sjrOutcomeText(\"fetched\", data.year, ensured.rows, ensured.detail, ensured.seconds, ensured.timing)") !== -1);
-
-  console.log("== 39. SJR timer display: phase split, in-progress tag, per-article time, TEMPORARY per-year list; WoS bar + button during pass; manual re-check note; WoS slowdown fixes; resume-aware Run button (28 Nov 2026) ==");
-  // Phase split in the tag: the worker's timing rides through
-  // ensureSjrYear into the outcome text.
-  check("sjrOutcomeText: fetched with tab timing shows the phase split",
-    DATA.sjrOutcomeText("fetched", 2017, 41551, "", 24, { tabMs: 2000, fetchMs: 19000, importMs: 3000 }) === "SJR 2017 saved, 41,551 rows, 24s (tab 2s, fetch 19s, import 3s)");
-  check("sjrOutcomeText: fetched with direct timing leaves out the 0s tab phase",
-    DATA.sjrOutcomeText("fetched", 2017, 41551, "", 22, { tabMs: 0, fetchMs: 19000, importMs: 3000 }) === "SJR 2017 saved, 41,551 rows, 22s (fetch 19s, import 3s)");
-  check("sjrOutcomeText: fetching state reads as an in-progress tag",
-    DATA.sjrOutcomeText("fetching", 2017) === "Getting SJR data for 2017…"
-    && DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetching", year: 2017 }]])) === "Getting SJR data for 2017…");
-  check("sjrLatestOutcomeText: latest year carries its timing split",
-    DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551, seconds: 24, timing: { tabMs: 2000, fetchMs: 19000, importMs: 3000 } }]])) === "SJR 2017 saved, 41,551 rows, 24s (tab 2s, fetch 19s, import 3s)");
-  // TEMPORARY per-year list: every year's line stays visible.
-  check("sjrYearListText: mixed outcomes, one line per year, sorted by year",
-    DATA.sjrYearListText(new Map([
-      [2026, { state: "not-released", year: 2026 }],
-      [2017, { state: "fetched", year: 2017, rows: 41551, seconds: 30, timing: { tabMs: 2000, fetchMs: 25000, importMs: 3000 } }],
-      [2019, { state: "ready", year: 2019, seconds: 0 }],
-    ])) === "2017: saved, 41,551 rows, 30s (tab 2s, fetch 25s, import 3s)\n2019: from cache, 0s\n2026: no data yet");
-  check("sjrYearListText: a not-released year keeps its line and never wipes earlier lines",
-    DATA.sjrYearListText(new Map([
-      [2017, { state: "fetched", year: 2017, rows: 41551, seconds: 30 }],
-      [2026, { state: "not-released", year: 2026 }],
-    ])).indexOf("2017: saved, 41,551 rows, 30s") !== -1
-    && DATA.sjrYearListText(new Map([
-      [2017, { state: "fetched", year: 2017, rows: 41551, seconds: 30 }],
-      [2026, { state: "not-released", year: 2026 }],
-    ])).indexOf("2026: no data yet") !== -1);
-  check("sjrYearListText: fetching and blocked lines, empty map gives empty text",
-    DATA.sjrYearListText(new Map([[2018, { state: "fetching", year: 2018 }]])) === "2018: getting data…"
-    && DATA.sjrYearListText(new Map([[2020, { state: "blocked", year: 2020, detail: "" }]])) === "2020: could not be downloaded"
-    && DATA.sjrYearListText(new Map()) === ""
-    && DATA.sjrYearListText(null) === "");
-  // Per-article time next to the counter.
-  check("batchArticleStatusText: previous row time shown, first row unchanged",
-    DATA.batchArticleStatusText(51, 65, "Short title here", 2) === "Checking article 51 of 65, last article 2s: Short title here…"
-    && DATA.batchArticleStatusText(1, 65, "Short title here", null) === "Checking article 1 of 65: Short title here…");
-  // Live state carries the list and the note to the full tab.
-  check("buildBatchLiveState carries the TEMPORARY per-year list and the MJL note",
-    DATA.buildBatchLiveState({ status: "x", sjrTag: "y", sjrYears: "2017: saved, 41,551 rows, 30s", mjlNote: "Manual re-check: 3 articles still need a WoS check" }).sjrYears === "2017: saved, 41,551 rows, 30s"
-    && DATA.buildBatchLiveState({ status: "x", sjrTag: "y", sjrYears: "2017: saved, 41,551 rows, 30s", mjlNote: "Manual re-check: 3 articles still need a WoS check" }).mjlNote === "Manual re-check: 3 articles still need a WoS check");
+  console.log("== 39. WoS bar + button during pass; manual re-check note; WoS slowdown fixes; resume-aware Run button (28 Nov 2026) ==");
   // Manual re-check note: says what it is and how many rows.
   check("mjlRecheckNoteText: none, one, several",
     DATA.mjlRecheckNoteText(0) === ""
     && DATA.mjlRecheckNoteText(1) === "Manual re-check: 1 article still needs a WoS check"
     && DATA.mjlRecheckNoteText(5) === "Manual re-check: 5 articles still need a WoS check");
-  // Wiring: timing flows, fetching state is set, rows are timed.
   const popupJs39 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
   const bgJs39 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
-  check("ensureSjrYear passes the worker timing into the outcome",
-    popupJs39.indexOf("timing: res.timing") !== -1);
-  check("direct SJR fetch returns per-phase timing",
-    bgJs39.indexOf("timing: { tabMs: 0, fetchMs, importMs") !== -1);
-  check("prefetch and row loop mark a year as fetching before awaiting it",
-    popupJs39.indexOf("sjrYearOutcomes.set(y, { state: \"fetching\", year: y })") !== -1
-    && popupJs39.indexOf("sjrYearOutcomes.set(year, { state: \"fetching\", year })") !== -1);
-  check("runBatch times each row and stops the clock before the polite pacing",
-    popupJs39.indexOf("const rowStartedAt = Date.now();") !== -1
-    && popupJs39.indexOf("lastArticleSeconds = DATA.sjrElapsedSec(rowStartedAt, Date.now());") !== -1);
-  check("per-year list renders under the tag and is cleared per run",
-    popupJs39.indexOf("batchSjrYearsEl.textContent = DATA.sjrYearListText(outcomes)") !== -1
-    && popupJs39.indexOf("if (batchSjrYearsEl) batchSjrYearsEl.textContent = \"\";") !== -1);
   // WoS bar moves with the WoS pass; button stays hidden during it.
   check("WoS onProgress moves the progress bar with checked/total",
     popupJs39.indexOf("batchProgressBarEl.style.width = Math.round((p.checked / p.total) * 100) + \"%\";") !== -1);
@@ -2390,6 +2293,202 @@ async function main() {
   check("store-first answers a stored negative with no tab opened",
     bgJs40.indexOf("if (stored.notIndexed) hit.notIndexed = true;") !== -1
     && bgJs40.indexOf("if (cacheKey && stored.category) mjlCategoryCache.set(cacheKey, hit);") !== -1);
+
+  console.log("== 41. Fresh-batch SJR race fix; Saudi Journal of Biological Sciences (delisted, not a bug); SJR Import line lists years; bug sweep (28 Nov 2026) ==");
+  // (a) The race: on a fresh batch the 3-at-a-time prefetch was
+  // still fetching the first years while the row loop ran
+  // through rows 1-17. A row whose year was "fetching" took the
+  // stale map entry without awaiting anything, so it kept a
+  // blank SJR even though the fetch landed seconds later and
+  // the year was stored (10 rows lost: 29 SJR vs 39 in the
+  // previous CSV). DATA.resolveBatchSjrRank awaits a fetching
+  // year and re-reads the rank once it lands.
+  const fakeStore41 = { 2021: { source: "SJR", quartile: "Q1", jif: null, wosCategory: "" } };
+  const getRank41 = async (issns, year) => fakeStore41[year] || { source: "none", quartile: "", jif: null, wosCategory: "" };
+  let ensureCalls41 = 0;
+  const ensureYear41 = async (year) => {
+    ensureCalls41++;
+    await sleep(10);
+    return { state: "fetched", year, rows: 45380 };
+  };
+  const outcomes41 = new Map([[2021, { state: "fetching", year: 2021 }]]);
+  const resolved41 = await DATA.resolveBatchSjrRank(getRank41, ensureYear41, outcomes41, ["1319562X"], 2021, { source: "none", quartile: "", jif: null, wosCategory: "" });
+  check("race fix: a row whose year is still fetching gets the SJR quartile once the fetch lands",
+    resolved41.rank && resolved41.rank.source === "SJR" && resolved41.rank.quartile === "Q1"
+    && resolved41.sjrState === "fetched" && ensureCalls41 === 1
+    && outcomes41.get(2021).state === "fetched");
+  const resolved41b = await DATA.resolveBatchSjrRank(getRank41, ensureYear41, outcomes41, ["1319562X"], 2021, { source: "none", quartile: "", jif: null, wosCategory: "" });
+  check("race fix: a later row for the same year reuses the landed fetch, no second fetch",
+    resolved41b.rank && resolved41b.rank.source === "SJR" && ensureCalls41 === 1);
+  let blockedCalls41 = 0;
+  const ensureBlocked41 = async (year) => { blockedCalls41++; return { state: "blocked", year, detail: "SJR blocked the download (bot check)" }; };
+  const getRankNone41 = async () => ({ source: "none", quartile: "", jif: null, wosCategory: "" });
+  const outcomesBlocked41 = new Map();
+  const blocked41a = await DATA.resolveBatchSjrRank(getRankNone41, ensureBlocked41, outcomesBlocked41, ["9999999X"], 2020, { source: "none", quartile: "", jif: null, wosCategory: "" });
+  const blocked41b = await DATA.resolveBatchSjrRank(getRankNone41, ensureBlocked41, outcomesBlocked41, ["9999999X"], 2020, { source: "none", quartile: "", jif: null, wosCategory: "" });
+  check("race fix: a blocked year keeps the row blank and the fetch runs only once for that year",
+    blocked41a.rank.source === "none" && blocked41a.sjrState === "blocked"
+    && blocked41b.rank.source === "none" && blockedCalls41 === 1);
+  let cachedCalls41 = 0;
+  const ensureCached41 = async (year) => { cachedCalls41++; return { state: "fetched", year, rows: 1 }; };
+  const outcomesCached41 = new Map([[2019, { state: "ready", year: 2019 }]]);
+  const cached41 = await DATA.resolveBatchSjrRank(getRankNone41, ensureCached41, outcomesCached41, ["1234567X"], 2019, { source: "none", quartile: "", jif: null, wosCategory: "" });
+  check("race fix: a cached year is read with no fetch",
+    cached41.rank.source === "none" && cached41.sjrState === "ready" && cachedCalls41 === 0);
+  const jcr41 = await DATA.resolveBatchSjrRank(getRankNone41, ensureCached41, new Map(), ["00280836"], 2015, { source: "JCR", quartile: "Q1", jif: 38.138, wosCategory: "W" });
+  check("race fix: a JCR row is returned as-is, no SJR fetch",
+    jcr41.rank.source === "JCR" && jcr41.sjrState === "jcr" && cachedCalls41 === 0);
+  // (b) Saudi Journal of Biological Sciences (1319-562X): the
+  // only row with an SJR quartile but no WoS category in all
+  // three batch CSVs. Diagnosis, 28 Nov 2026: Crossref and
+  // OpenAlex return only that one ISSN for the journal, so the
+  // extension tries exactly one ISSN; and the journal was
+  // REMOVED from SCIE on 22 May 2024 for editorial reasons
+  // (title discontinued June 2024), so the current MJL list
+  // genuinely has no row for it — the blank WoS is CORRECT,
+  // not a bug, and no category may be invented. The parser
+  // guard: a "Found 0 results" page answers not-indexed even
+  // when the page still carries a stale SCIE mention.
+  const FREE41 = require("../freedata.js");
+  check("Saudi guard: MJL 'Found 0 results' wins over a stale SCIE mention on the same page",
+    FREE41.parseMjlSearchHtml("<p>Found 0 results</p><p>Indexed in Web of Science (SCIE)</p>").found === "not-indexed"
+    && FREE41.parseMjlSearchHtml("<p>Found 0 results</p>").found === "not-indexed");
+  // (c) Import section: the SJR line lists the saved years,
+  // not the total row count (user, 28 Nov 2026: "list years,
+  // whose data is saved not total rows").
+  const from41 = new Date("2026-11-28T12:00:00.000Z");
+  const metaYears41 = { sjrRows: 538583, sjrFiles: [
+    { fileName: "SJR 2025 (auto-fetch)", importedAt: "2026-11-28T10:00:00.000Z", rows: 50000 },
+    { fileName: "scimagojr_2013.csv", year: 2013, importedAt: "2026-11-28T10:00:00.000Z", rows: 39705 },
+    { fileName: "scimagojr_2015.csv", year: 2015, importedAt: "2026-11-28T10:00:00.000Z", rows: 41125 },
+    { fileName: "SJR 2025 (auto-fetch)", importedAt: "2026-11-28T10:00:00.000Z", rows: 50000 },
+  ] };
+  check("savedSjrYears: every saved unexpired year, sorted, no duplicates",
+    eq(DATA.savedSjrYears(metaYears41, from41), [2013, 2015, 2025]));
+  check("sjrStatusText: several years listed, fallback label and expiry kept, no total rows",
+    DATA.sjrStatusText(metaYears41, from41) === "SJR data saved for 2013, 2015, 2025 (fallback only, never shown as JCR). Valid until June 2027, 7 months left.");
+  check("sjrStatusText: one year",
+    DATA.sjrStatusText({ sjrRows: 50000, sjrFiles: [{ fileName: "SJR 2025 (auto-fetch)", importedAt: "2026-11-28T10:00:00.000Z", rows: 50000 }] }, from41) === "SJR data saved for 2025 (fallback only, never shown as JCR). Valid until June 2027, 7 months left.");
+  check("sjrStatusText: no SJR year saved keeps the empty-state line",
+    DATA.sjrStatusText({ sjrRows: 0, sjrFiles: [] }) === "No SJR data imported yet."
+    && DATA.sjrStatusText({ sjrRows: 0, sjrFiles: [] }, from41) === "No SJR data imported yet.");
+  check("savedSjrYears: an expired year is not listed, and the line reads as no data saved",
+    eq(DATA.savedSjrYears({ sjrFiles: [{ fileName: "scimagojr_2024.csv", year: 2024, importedAt: "2024-01-01T00:00:00.000Z", rows: 40000 }] }, from41), [])
+    && DATA.sjrStatusText({ sjrRows: 40000, sjrFiles: [{ fileName: "scimagojr_2024.csv", year: 2024, importedAt: "2024-01-01T00:00:00.000Z", rows: 40000 }] }, from41) === "No SJR data imported yet.");
+  check("sjrStatusText: rows exist but no year could be read, so the row total is the fallback",
+    DATA.sjrStatusText({ sjrRows: 100, sjrFiles: [{ fileName: "odd.csv", importedAt: "2026-11-28T10:00:00.000Z", rows: 100 }] }, from41) === "SJR data: 100 rows (fallback only, never shown as JCR). Valid until June 2027, 7 months left.");
+  const popupJs41 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  check("Import section uses the years line, not the row total",
+    popupJs41.indexOf("sjrStatusEl.textContent = DATA.sjrStatusText(meta);") !== -1
+    && popupJs41.indexOf("SJR data: ${meta.sjrRows} rows") === -1);
+  // (d) Bug sweep fixes.
+  // A failed article lookup must not be cached: the cache
+  // stored any non-null value, so a transient network failure
+  // was kept as the answer and every retry in the same session
+  // returned the cached failure without re-fetching — the
+  // panel never recovered until reload.
+  const NET41 = require("../net.js");
+  const cache41 = new NET41.ArticleCache(10);
+  let failCount41 = 0;
+  const failLoader41 = async () => { failCount41++; return { notFound: true, reason: "network" }; };
+  await cache41.getOrFetch("doi:10.1/x", failLoader41, (v) => !(v && v.notFound));
+  await cache41.getOrFetch("doi:10.1/x", failLoader41, (v) => !(v && v.notFound));
+  check("article cache: a failed lookup is not cached, a retry re-fetches",
+    failCount41 === 2 && cache41.get("doi:10.1/x") === undefined);
+  let foundCount41 = 0;
+  const foundLoader41 = async () => { foundCount41++; return { data: { title: "T" }, sourceName: "Crossref" }; };
+  const found41a = await cache41.getOrFetch("doi:10.1/y", foundLoader41, (v) => !(v && v.notFound));
+  const found41b = await cache41.getOrFetch("doi:10.1/y", foundLoader41, (v) => !(v && v.notFound));
+  check("article cache: a found article is still cached, one fetch for two lookups",
+    foundCount41 === 1 && found41a === found41b);
+  let plainCount41 = 0;
+  const plainLoader41 = async () => { plainCount41++; return { n: 1 }; };
+  await cache41.getOrFetch("k:1", plainLoader41);
+  await cache41.getOrFetch("k:1", plainLoader41);
+  check("article cache: without a predicate every value is cached, as before",
+    plainCount41 === 1);
+  let sharedCount41 = 0;
+  const sharedLoader41 = async () => { sharedCount41++; await sleep(10); return { data: { title: "S" }, sourceName: "OpenAlex" }; };
+  const [s41a, s41b] = await Promise.all([
+    cache41.getOrFetch("doi:10.1/z", sharedLoader41, (v) => !(v && v.notFound)),
+    cache41.getOrFetch("doi:10.1/z", sharedLoader41, (v) => !(v && v.notFound)),
+  ]);
+  check("article cache: two identical lookups started together still share one fetch",
+    s41a === s41b && sharedCount41 === 1);
+  check("panel: both article lookups skip caching for not-found results",
+    popupJs41.indexOf('articleCache.getOrFetch("doi:" + doi.toLowerCase(), run, (v) => !(v && v.notFound))') !== -1
+    && popupJs41.indexOf('articleCache.getOrFetch(key, run, (v) => !(v && v.notFound))') !== -1);
+  // Late-store SJR lines: the year's own rows, never the store
+  // total across all saved years (both call sites: the Get free
+  // SJR data button and ensureSjrYear).
+  check("late-store SJR lines report the year's own rows, never the store total",
+    popupJs41.indexOf("file2.rows} rows for ${year}") !== -1
+    && popupJs41.indexOf("meta2.sjrRows} rows for ${year}") === -1
+    && popupJs41.indexOf("rows: meta2.sjrRows") === -1);
+  // Picking a file: only a valid different file clears the
+  // saved batch — a wrong file, a read error, clearing the
+  // picker, or a file with no usable rows leaves it alone.
+  const handler41 = popupJs41.slice(popupJs41.indexOf("batchFileEl.addEventListener"), popupJs41.indexOf("function batchRowToResult"));
+  check("picking a file clears the saved batch only when it is a valid different file",
+    (handler41.match(/clearBatchState\(\)/g) || []).length === 1
+    && handler41.indexOf("cleared only by a valid different file") !== -1);
+  // An early batch stop re-offers the saved resume instead of
+  // leaving the Run button to restart from article 1.
+  const early41 = popupJs41.slice(popupJs41.indexOf("if (!finished) {"), popupJs41.indexOf("if (stopped) {"));
+  check("an early batch stop re-offers the saved resume instead of leaving Run to restart",
+    early41.indexOf("offerBatchResume(saved)") !== -1
+    && early41.indexOf("Batch stopped early") !== -1);
+
+  console.log("== 42. Timer removed entirely; one batch completion line (28 Nov 2026) ==");
+  // The diagnosis is done: the per-year timer and the whole
+  // time display are removed on the user's word ("will remove
+  // the time entirely"). The only time shown anywhere is the
+  // single completion line at the end of a batch.
+  check("formatBatchDuration: whole seconds, minutes and seconds, no decimals",
+    DATA.formatBatchDuration(0) === "0s"
+    && DATA.formatBatchDuration(499) === "0s"
+    && DATA.formatBatchDuration(500) === "1s"
+    && DATA.formatBatchDuration(52000) === "52s"
+    && DATA.formatBatchDuration(61000) === "1m 1s"
+    && DATA.formatBatchDuration(252000) === "4m 12s"
+    && DATA.formatBatchDuration(-1000) === "0s");
+  check("sjrPlainOutcomeText: no seconds anywhere in any outcome",
+    DATA.sjrPlainOutcomeText("ready", 2017) === "SJR 2017 from cache"
+    && DATA.sjrPlainOutcomeText("fetched", 2017, 41551) === "SJR 2017 saved, 41,551 rows"
+    && DATA.sjrPlainOutcomeText("fetched", 2017, 0) === "SJR 2017 saved"
+    && DATA.sjrPlainOutcomeText("not-released", 2026) === "No SJR data for 2026 yet"
+    && DATA.sjrPlainOutcomeText("blocked", 2021) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page"
+    && DATA.sjrPlainOutcomeText("fetching", 2017) === "");
+  check("sjrLatestPlainOutcomeText: a fetching entry is skipped, the latest resolved year shows",
+    DATA.sjrLatestPlainOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551 }], [2018, { state: "fetching", year: 2018 }]])) === "SJR 2017 saved, 41,551 rows"
+    && DATA.sjrLatestPlainOutcomeText(new Map([[2018, { state: "fetching", year: 2018 }]])) === ""
+    && DATA.sjrLatestPlainOutcomeText(new Map()) === ""
+    && DATA.sjrLatestPlainOutcomeText(null) === "");
+  // Static absence: no timer name or element survives in any
+  // of the four files the panel runs.
+  const popupJs42 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  const jcrJs42 = fs.readFileSync(path.join(DIR, "..", "jcr.js"), "utf8");
+  const bgJs42 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
+  const panel42 = fs.readFileSync(path.join(DIR, "..", "sidepanel.html"), "utf8");
+  const timerNames42 = ["sjrElapsedSec", "sjrPhaseText", "sjrOutcomeText", "sjrYearListText", "batchArticleStatusText", "sjrLatestOutcomeText", "batchSjrYearsEl", "lastArticleSeconds", "rowStartedAt", "fetchStartedAt", "enteredAt", "timed("];
+  check("no timer helper, element or variable survives in popup.js, jcr.js, background.js or sidepanel.html",
+    timerNames42.every((n) => popupJs42.indexOf(n) === -1 && jcrJs42.indexOf(n) === -1 && bgJs42.indexOf(n) === -1 && panel42.indexOf(n) === -1)
+    && panel42.indexOf('id="batch-sjr-years"') === -1
+    && jcrJs42.indexOf("sjrYears:") === -1);
+  check("the single lookup status line names the saved year, with no time",
+    popupJs42.indexOf('"SJR data saved for " + data.year + "."') !== -1);
+  // Completion line: finished and stopped forms, and the clock
+  // rides the saved state so a resumed batch counts the whole
+  // batch, not just the last run.
+  check("finished batch ends with one completion line, minutes and seconds, no decimals",
+    popupJs42.indexOf("Completed ${rows.length} articles in ${DATA.formatBatchDuration(batchElapsedMs())}.") !== -1);
+  check("stopped batch folds the same time into its line",
+    popupJs42.indexOf("Batch stopped at ${batchResults.length} of ${rows.length} articles in ${DATA.formatBatchDuration(batchElapsedMs())}") !== -1);
+  check("elapsed time is saved per row and carried through stop and resume",
+    popupJs42.indexOf("saveBatchState(rows, batchResults, i + 1, batchElapsedMs())") !== -1
+    && popupJs42.indexOf("elapsedMs: elapsedMs || 0") !== -1
+    && popupJs42.indexOf("elapsedMs: args.saved.elapsedMs || 0") !== -1
+    && popupJs42.indexOf("const batchElapsedBaseMs = (opts && opts.elapsedMs) || 0;") !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));

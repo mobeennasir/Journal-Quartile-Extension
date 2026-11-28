@@ -1129,7 +1129,7 @@ async function getSjrSharedTab(year) {
       if (tab && tab.url && tab.url.indexOf("https://www.scimagojr.com/") === 0) {
         const state = await pollSjrTabForClearance(sjrSharedTabId, 2000);
         if (state === "cleared" || state === "timeout") {
-          return { tabId: sjrSharedTabId, warm: true, tabMs: Date.now() - startedAt };
+          return { tabId: sjrSharedTabId, warm: true };
         }
         await closeExtensionTab(sjrSharedTabId);
       }
@@ -1147,7 +1147,7 @@ async function getSjrSharedTab(year) {
         const state = await pollSjrTabForClearance(sjrEntries[0].tabId, 2000);
         if (state === "cleared" || state === "timeout") {
           sjrSharedTabId = sjrEntries[0].tabId;
-          return { tabId: sjrEntries[0].tabId, warm: true, tabMs: Date.now() - startedAt };
+          return { tabId: sjrEntries[0].tabId, warm: true };
         }
         await closeExtensionTab(sjrEntries[0].tabId);
       }
@@ -1159,7 +1159,7 @@ async function getSjrSharedTab(year) {
   // and open two.
   if (sjrSharedTabCreating) {
     const shared = await sjrSharedTabCreating;
-    return { tabId: shared.tabId, warm: shared.warm, error: shared.error, detail: shared.detail, tabMs: Date.now() - startedAt };
+    return { tabId: shared.tabId, warm: shared.warm, error: shared.error, detail: shared.detail };
   }
   sjrSharedTabCreating = (async () => {
     // Clearance fresh -> light home page, no ranking page
@@ -1200,8 +1200,8 @@ async function getSjrSharedTab(year) {
   })();
   try {
     const created = await sjrSharedTabCreating;
-    if (created.error) return { error: created.error, year, detail: created.detail || "", tabMs: Date.now() - startedAt };
-    return { tabId: created.tabId, warm: created.warm, tabMs: Date.now() - startedAt };
+    if (created.error) return { error: created.error, year, detail: created.detail || "" };
+    return { tabId: created.tabId, warm: created.warm };
   } finally {
     sjrSharedTabCreating = null;
   }
@@ -1210,40 +1210,31 @@ async function getSjrSharedTab(year) {
 // Fetch the CSV for one year from the shared SJR tab and import
 // it. The tab is NOT closed here: it is reused for the next
 // year, and closed by the sweep at batch end or worker startup.
-// The outcome carries per-phase timings (tab / fetch / import)
-// so a slow batch can say which phase was slow.
 async function fetchSjrViaTab(year) {
-  const startedAt = Date.now();
   let outcome = null;
   try {
     const shared = await getSjrSharedTab(year);
-    const tabMs = shared.tabMs || 0;
     if (shared.error) {
-      outcome = { error: shared.error, year, detail: shared.detail || "", timing: { tabMs, fetchMs: 0, importMs: 0, totalMs: Date.now() - startedAt } };
+      outcome = { error: shared.error, year, detail: shared.detail || "" };
       return outcome;
     }
-    const fetchStartedAt = Date.now();
     const fetched = await fetchSjrCsvInTab(shared.tabId, year);
-    const fetchMs = Date.now() - fetchStartedAt;
     if (fetched.error) {
-      outcome = { error: fetched.error, year, detail: fetched.detail || "", timing: { tabMs, fetchMs, importMs: 0, totalMs: Date.now() - startedAt } };
+      outcome = { error: fetched.error, year, detail: fetched.detail || "" };
       return outcome;
     }
-    const importStartedAt = Date.now();
     const done = await importSjrText(fetched.text, year);
-    const importMs = Date.now() - importStartedAt;
     if (!done.rows) {
       outcome = { error: "not-csv", year,
         detail: done.wrongYear
           ? "wrong-year: SJR returned the " + done.wrongYear + " file for a " + year + " request"
-          : "downloaded text parsed to 0 rows (" + done.skipped + " skipped)",
-        timing: { tabMs, fetchMs, importMs, totalMs: Date.now() - startedAt } };
+          : "downloaded text parsed to 0 rows (" + done.skipped + " skipped)" };
       return outcome;
     }
-    outcome = { rows: done.rows, skipped: done.skipped, year, via: "browser-tab", timing: { tabMs, fetchMs, importMs, totalMs: Date.now() - startedAt } };
+    outcome = { rows: done.rows, skipped: done.skipped, year, via: "browser-tab" };
     return outcome;
   } catch (err) {
-    outcome = { error: "failed", year, detail: String(err && err.message || err), timing: { tabMs: 0, fetchMs: 0, importMs: 0, totalMs: Date.now() - startedAt } };
+    outcome = { error: "failed", year, detail: String(err && err.message || err) };
     return outcome;
   } finally {
     if (outcome) recordSjrTabFetch(outcome);
@@ -1258,7 +1249,7 @@ function recordSjrTabFetch(outcome) {
     if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local || !outcome || !outcome.year) return;
     const key = "sjrTabFetch:" + outcome.year;
     const save = {};
-    save[key] = { state: outcome.rows ? "fetched" : outcome.error, rows: outcome.rows || 0, at: new Date().toISOString(), detail: outcome.detail || "", timing: outcome.timing || null };
+    save[key] = { state: outcome.rows ? "fetched" : outcome.error, rows: outcome.rows || 0, at: new Date().toISOString(), detail: outcome.detail || "" };
     chrome.storage.local.set(save, () => {});
   } catch (err) { /* storage is best-effort here */ }
 }
@@ -1457,24 +1448,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "fetchSjrExport") {
     (async () => {
       const year = message.year || FREE.sjrLatestYear();
-      // TEMPORARY (28 Nov 2026): per-phase timing for the
-      // diagnostic tag — the tab path already returns this
-      // shape, the direct path did not. Removed with the rest
-      // of the time display after the diagnosis.
-      const startedAt = Date.now();
       const fetched = await fetchSjrYear(year);
-      const fetchMs = Date.now() - startedAt;
       if (fetched.error) {
-        sendResponse({ error: fetched.error, year, timing: { tabMs: 0, fetchMs, importMs: 0, totalMs: Date.now() - startedAt } });
+        sendResponse({ error: fetched.error, year });
         return;
       }
       try {
-        const importStartedAt = Date.now();
         const done = await importSjrText(fetched.text, year);
-        const importMs = Date.now() - importStartedAt;
-        sendResponse({ rows: done.rows, skipped: done.skipped, warnings: done.warnings, year, timing: { tabMs: 0, fetchMs, importMs, totalMs: Date.now() - startedAt } });
+        sendResponse({ rows: done.rows, skipped: done.skipped, warnings: done.warnings, year });
       } catch (err) {
-        sendResponse({ error: "failed", year, detail: String(err && err.message || err), timing: { tabMs: 0, fetchMs, importMs: 0, totalMs: Date.now() - startedAt } });
+        sendResponse({ error: "failed", year, detail: String(err && err.message || err) });
       }
     })().catch((err) => sendResponse({ error: "failed", detail: String(err && err.message || err) }));
     return true;

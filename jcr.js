@@ -1144,43 +1144,19 @@
     return "";
   }
 
-  // Per-year SJR fetch timer (28 Nov 2026, user asked for it
-  // for testing): whole seconds between the fetch starting and
-  // the year's rows being stored, rounded, never negative.
-  // 499 ms reads as 0s, 500 ms as 1s.
-  // TEMPORARY (28 Nov 2026): the whole time display is removed
-  // after the diagnosis — see DEV-NOTES.md section 39 for the
-  // removal list. All timer text lives in the helpers in this
-  // block (sjrElapsedSec, sjrPhaseText, sjrOutcomeText,
-  // sjrLatestOutcomeText, sjrYearListText, batchArticleStatusText)
-  // and the call sites that pass seconds/timing.
-  function sjrElapsedSec(startedAtMs, endedAtMs) {
-    const s = Math.round((Number(endedAtMs) - Number(startedAtMs)) / 1000);
-    return (s < 0 || !isFinite(s)) ? 0 : s;
-  }
-
-  // Phase split for a fresh SJR fetch, from the worker's timing
-  // { tabMs, fetchMs, importMs }: "(tab 2s, fetch 19s, import
-  // 3s)". Phases of 0s are left out (the direct worker fetch
-  // has no tab: "(fetch 19s, import 3s)"). No timing, or all
-  // phases 0s, gives "".
-  function sjrPhaseText(timing) {
-    if (!timing) return "";
-    const parts = [];
-    if (timing.tabMs > 0) parts.push("tab " + sjrElapsedSec(0, timing.tabMs) + "s");
-    if (timing.fetchMs > 0) parts.push("fetch " + sjrElapsedSec(0, timing.fetchMs) + "s");
-    if (timing.importMs > 0) parts.push("import " + sjrElapsedSec(0, timing.importMs) + "s");
-    return parts.length ? " (" + parts.join(", ") + ")" : "";
-  }
-
-  function sjrOutcomeText(state, year, rows, detail, seconds, timing) {
-    const timed = typeof seconds === "number";
+  // ---------- Single SJR tag (pure, unit-tested) ----------
+  // ONE tag, updated — never a paragraph listing every saved
+  // year (user, 27 Nov 2026). outcomes is the Map year ->
+  // outcome, in the order years resolved; the tag shows only
+  // the latest resolved one and is replaced when the next year
+  // saves ("SJR 2022 saved, 46,790 rows"). No seconds anywhere:
+  // the per-year timer was removed 28 Nov 2026, on the user's
+  // word, once the diagnosis was done — the only time shown
+  // is the single batch completion line.
+  function sjrPlainOutcomeText(state, year, rows, detail) {
     switch (state) {
-      case "fetching": return "Getting SJR data for " + year + "…";
-      case "ready": return timed
-        ? "SJR " + year + " from cache, " + seconds + "s"
-        : "SJR " + year + " already saved";
-      case "fetched": return "SJR " + year + " saved" + (rows ? ", " + Number(rows).toLocaleString("en-US") + " rows" : "") + (timed ? ", " + seconds + "s" + sjrPhaseText(timing) : "");
+      case "ready": return "SJR " + year + " from cache";
+      case "fetched": return "SJR " + year + " saved" + (rows ? ", " + Number(rows).toLocaleString("en-US") + " rows" : "");
       case "blocked": case "challenge": case "failed": {
         const reason = detail ? sjrBlockReason(detail) : "";
         return "SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page" + (reason ? " (" + reason + ")" : "");
@@ -1190,70 +1166,30 @@
     }
   }
 
-  // TEMPORARY per-year list (28 Nov 2026, for testing only):
-  // one short line per distinct year resolved in this batch
-  // run, so every year's time stays visible instead of only
-  // the latest year in the single tag. A not-released or
-  // blocked year gets its own line and never wipes the lines
-  // of years that already resolved. Sorted by year. Remove
-  // after the diagnosis, with the rest of the time display.
-  function sjrYearListText(outcomes) {
+  function sjrLatestPlainOutcomeText(outcomes) {
     if (!outcomes) return "";
     const entries = outcomes instanceof Map
       ? [...outcomes.entries()]
       : (Array.isArray(outcomes) ? outcomes : []);
-    if (!entries.length) return "";
-    entries.sort((a, b) => Number(a[0]) - Number(b[0]));
-    const lines = [];
-    for (const [year, o] of entries) {
-      const y = Number(year);
-      if (!y || !o || !o.state) continue;
-      if (o.state === "fetching") { lines.push(y + ": getting data…"); continue; }
-      if (o.state === "ready") {
-        lines.push(y + ": from cache" + (typeof o.seconds === "number" ? ", " + o.seconds + "s" : ""));
-        continue;
-      }
-      if (o.state === "fetched") {
-        lines.push(y + ": saved" + (o.rows ? ", " + Number(o.rows).toLocaleString("en-US") + " rows" : "") + (typeof o.seconds === "number" ? ", " + o.seconds + "s" + sjrPhaseText(o.timing) : ""));
-        continue;
-      }
-      if (o.state === "not-released") { lines.push(y + ": no data yet"); continue; }
-      if (o.state === "blocked" || o.state === "challenge" || o.state === "failed") {
-        const reason = o.detail ? sjrBlockReason(o.detail) : "";
-        lines.push(y + ": could not be downloaded" + (reason ? " (" + reason + ")" : ""));
-        continue;
-      }
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const o = entries[i][1];
+      if (!o || !o.state || o.state === "fetching") continue;
+      return sjrPlainOutcomeText(o.state, entries[i][0], o.rows, o.detail);
     }
-    return lines.join("\n");
+    return "";
   }
 
-  // TEMPORARY per-article time (28 Nov 2026, for testing):
-  // the batch status line for one row, with how long the
-  // previous row took — the wait the user actually feels is
-  // the Crossref/OpenAlex lookup per article, not the SJR
-  // year fetch. lastSeconds null (first row) gives the old
-  // line unchanged. Remove after the diagnosis.
-  function batchArticleStatusText(index, total, title, lastSeconds) {
-    const base = "Checking article " + index + " of " + total;
-    const timed = typeof lastSeconds === "number" ? ", last article " + lastSeconds + "s" : "";
-    return base + timed + ": " + String(title || "").slice(0, 60) + "…";
+  // Batch completion time (28 Nov 2026): whole seconds,
+  // minutes and seconds, no decimals — "52s", "4m 12s".
+  // 499 ms reads as 0s, 500 ms as 1s.
+  function formatBatchDuration(elapsedMs) {
+    const total = Math.round(Number(elapsedMs) / 1000);
+    const s = (total < 0 || !isFinite(total)) ? 0 : total;
+    const m = Math.floor(s / 60);
+    const rest = s % 60;
+    return m > 0 ? m + "m " + rest + "s" : s + "s";
   }
 
-  // ---------- Single SJR tag (pure, unit-tested) ----------
-  // ONE tag, updated — never a paragraph listing every saved
-  // year (user, 27 Nov 2026). outcomes is the Map year ->
-  // outcome, in the order years resolved; the tag shows only
-  // the latest one and is replaced when the next year saves
-  // ("SJR 2022 saved, 46,790 rows").
-  function sjrLatestOutcomeText(outcomes) {
-    if (!outcomes) return "";
-    const entries = outcomes instanceof Map
-      ? [...outcomes.entries()]
-      : (Array.isArray(outcomes) ? outcomes : []);
-    if (!entries.length) return "";
-    const last = entries[entries.length - 1];
-    return sjrOutcomeText(last[1].state, last[0], last[1].rows, last[1].detail, last[1].seconds, last[1].timing) || "";
-  }
 
   // Manual WoS re-check note (28 Nov 2026): when the "Get WoS
   // categories (free)" button appears, it is a manual re-check
@@ -1494,6 +1430,47 @@
     return text;
   }
 
+  // SJR years saved, not the row total (28 Nov 2026, user's
+  // word: "list years, whose data is saved not total rows"):
+  // every saved unexpired year, sorted, no duplicates. A file
+  // whose year cannot be read (no recorded year, no "SJR
+  // YYYY" in its name) is skipped here; the status line falls
+  // back to the row total only when rows exist but no year
+  // could be read at all.
+  function savedSjrYears(meta, fromDate) {
+    if (!meta || !meta.sjrFiles) return [];
+    const years = [];
+    for (const f of meta.sjrFiles) {
+      const y = sjrFileYear(f);
+      if (y && !isExpired(f.importedAt, "sjr", fromDate) && years.indexOf(y) === -1) years.push(y);
+    }
+    years.sort((a, b) => a - b);
+    return years;
+  }
+
+  function sjrStatusText(meta, fromDate) {
+    const years = savedSjrYears(meta, fromDate);
+    if (!years.length) {
+      // Rows exist but no year could be read (an old file
+      // record with no recorded year and no "SJR YYYY" in its
+      // name): fall back to the row total. Expired files do
+      // not count — their data is no longer usable, so the
+      // line reads as no data saved.
+      const liveYearless = (meta && meta.sjrFiles || []).some((f) => !sjrFileYear(f) && !isExpired(f.importedAt, "sjr", fromDate));
+      if (liveYearless && meta.sjrRows) {
+        const file = latestMetaFile(meta.sjrFiles);
+        let text = "SJR data: " + meta.sjrRows + " rows (fallback only, never shown as JCR).";
+        if (file && file.importedAt) text += " " + validUntilText(file.importedAt, "sjr") + ".";
+        return text;
+      }
+      return "No SJR data imported yet.";
+    }
+    const file = latestMetaFile(meta.sjrFiles);
+    let text = "SJR data saved for " + years.join(", ") + " (fallback only, never shown as JCR).";
+    if (file && file.importedAt) text += " " + validUntilText(file.importedAt, "sjr") + ".";
+    return text;
+  }
+
   // ---------- Batch live progress text (28 Nov 2026) ----------
   // WoS/HEC pass progress, shown in the same status area as the
   // batch summary while the pass runs.
@@ -1535,6 +1512,45 @@
     }).length;
   }
 
+  // Batch row SJR resolution (28 Nov 2026, fresh-batch race):
+  // the first rank lookup returns "none" when the year's SJR
+  // file is not stored yet. If the prefetch is still fetching
+  // that year, the row must await the same in-flight fetch
+  // (ensureYear dedupes per year, so no second fetch) and
+  // re-read the rank once it lands. The old row loop took the
+  // stale { state: "fetching" } map entry without awaiting
+  // anything, so the row kept a blank SJR for a year that was
+  // only seconds away — on a fresh batch (extension removed
+  // and re-added, all years fetched fresh) that lost 10 early
+  // rows, all in the first years the 3-at-a-time prefetch was
+  // still fetching. A cached ("ready") year costs no wait; a
+  // blocked, challenge or not-released year keeps the row
+  // blank with no retry per row. Returns { rank, sjrState }.
+  async function resolveBatchSjrRank(getRank, ensureYear, outcomes, issns, year, rank) {
+    let sjrState = "";
+    if (rank && rank.source === "SJR") sjrState = "ready";
+    else if (rank && rank.source === "JCR") sjrState = "jcr";
+    if (rank && rank.source === "none" && year) {
+      let ensured;
+      if (outcomes.has(year)) {
+        ensured = outcomes.get(year);
+        if (ensured.state === "fetching") {
+          ensured = await ensureYear(year);
+          outcomes.set(year, ensured);
+        }
+      } else {
+        outcomes.set(year, { state: "fetching", year: year });
+        ensured = await ensureYear(year);
+        outcomes.set(year, ensured);
+      }
+      sjrState = ensured.state;
+      if (ensured.state === "fetched") {
+        rank = await getRank(issns, year);
+      }
+    }
+    return { rank: rank, sjrState: sjrState };
+  }
+
   // ---------- Batch live state (28 Nov 2026) ----------
   // The side panel and the full tab are two pages: batch progress
   // used to live only in the panel page's memory, so the full tab
@@ -1545,9 +1561,6 @@
     return {
       status: fields.status || "",
       sjrTag: fields.sjrTag || "",
-      // TEMPORARY (28 Nov 2026): per-year timer list text,
-      // removed with the rest of the time display.
-      sjrYears: fields.sjrYears || "",
       mjlNote: fields.mjlNote || "",
       progressPct: typeof fields.progressPct === "number" ? fields.progressPct : 0,
       resultsHidden: !!fields.resultsHidden,
@@ -1578,7 +1591,7 @@
     MemoryStore: MemoryStore, IdbStore: IdbStore,
     lookupRankSync: lookupRankSync,
     RESULTS_HEADER: RESULTS_HEADER, resultsToCsv: resultsToCsv,
-    sjrOutcomeText: sjrOutcomeText, sjrLatestOutcomeText: sjrLatestOutcomeText, sjrYearListText: sjrYearListText, batchArticleStatusText: batchArticleStatusText, sjrBlockReason: sjrBlockReason, sjrElapsedSec: sjrElapsedSec, notFoundBreakdown: notFoundBreakdown,
+    sjrPlainOutcomeText: sjrPlainOutcomeText, sjrLatestPlainOutcomeText: sjrLatestPlainOutcomeText, formatBatchDuration: formatBatchDuration, sjrBlockReason: sjrBlockReason, notFoundBreakdown: notFoundBreakdown,
     batchResumePoint: batchResumePoint, batchRowsMatch: batchRowsMatch,
     nextJcrExpiry: nextJcrExpiry,
     sjrExpiresAt: sjrExpiresAt, mjlExpiresAt: mjlExpiresAt, mjlNotIndexedExpiresAt: mjlNotIndexedExpiresAt,
@@ -1587,8 +1600,8 @@
     monthsLeft: monthsLeft, monthsLeftText: monthsLeftText,
     validUntilText: validUntilText, isExpired: isExpired,
     sjrFileYear: sjrFileYear, sjrFilesCoverYear: sjrFilesCoverYear,
-    mjlStatusText: mjlStatusText, hecStatusText: hecStatusText,
-    wosProgressText: wosProgressText, wosPassText: wosPassText, batchRowsNeedingWosCheck: batchRowsNeedingWosCheck, mjlRecheckNoteText: mjlRecheckNoteText,
+    mjlStatusText: mjlStatusText, hecStatusText: hecStatusText, savedSjrYears: savedSjrYears, sjrStatusText: sjrStatusText,
+    wosProgressText: wosProgressText, wosPassText: wosPassText, batchRowsNeedingWosCheck: batchRowsNeedingWosCheck, mjlRecheckNoteText: mjlRecheckNoteText, resolveBatchSjrRank: resolveBatchSjrRank,
     buildBatchLiveState: buildBatchLiveState, batchLiveStateIsFresh: batchLiveStateIsFresh,
   };
 
