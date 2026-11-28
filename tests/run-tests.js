@@ -524,8 +524,8 @@ async function main() {
   check("background handles fetchMjlCategory and fetchSjrExport messages",
     bgJs.indexOf('message.type === "fetchMjlCategory"') !== -1
     && bgJs.indexOf('message.type === "fetchSjrExport"') !== -1);
-  check("manifest is 0.4.4 with MJL, SJR and DOAJ host permissions",
-    manifest.version === "0.4.4"
+  check("manifest is 0.4.5 with MJL, SJR and DOAJ host permissions",
+    manifest.version === "0.4.5"
     && manifest.host_permissions.indexOf("https://mjl.clarivate.com/*") !== -1
     && manifest.host_permissions.indexOf("https://www.scimagojr.com/*") !== -1
     && manifest.host_permissions.indexOf("https://scimagojr.com/*") !== -1
@@ -904,7 +904,7 @@ async function main() {
     && runBatchSrc.indexOf("sjrYearOutcomes.set(year, ensured)") !== -1
     && runBatchSrc.indexOf("updateBatchSjrStatus(sjrYearOutcomes)") !== -1);
   check("ensureSjrYear returns the fetched row count so the status can prove the download",
-    popupJs.indexOf('return { state: "fetched", year: y, rows: res.rows }') !== -1);
+    popupJs.indexOf('return timed({ state: "fetched", year: y, rows: res.rows })') !== -1);
   // CSV is the only per-row view: every row and every column.
   const csvResults = [
     { title: "A", journal: "J1", year: "2021", issn: "0000-0001", doi: "10.1/a", rank: { source: "JCR", quartile: "Q2", jif: 5.07, wosCategory: "W" }, note: "" },
@@ -1303,7 +1303,7 @@ async function main() {
     && DATA.sjrOutcomeText("blocked", 2021) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page");
   const popupJs33 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
   check("ensureSjrYear returns the failure detail instead of a bare blocked",
-    popupJs33.indexOf('return { state: "blocked", year: y, detail: res && res.detail ? res.detail : "" };') !== -1);
+    popupJs33.indexOf('return timed({ state: "blocked", year: y, detail: res && res.detail ? res.detail : "" })') !== -1);
   check("single lookup shows the short failure reason in the SJR row",
     popupJs33.indexOf("rankingRows(data, rank, sjrNote, sjrDetail)") !== -1
     && popupJs33.indexOf("DATA.sjrBlockReason(sjrDetail)") !== -1);
@@ -1358,8 +1358,8 @@ async function main() {
   check("manifest name and author are the owner's, no internal Phase label",
     manifest34.name === "Journal Quartile Extension" && manifest34.author === "Mobeen Nasir"
     && manifest34.name.indexOf("Phase") === -1 && String(manifest34.action.default_title).indexOf("Phase") === -1);
-  check("manifest is MV3, version 0.4.4, host permissions scoped",
-    manifest34.manifest_version === 3 && manifest34.version === "0.4.4"
+  check("manifest is MV3, version 0.4.5, host permissions scoped",
+    manifest34.manifest_version === 3 && manifest34.version === "0.4.5"
     && manifest34.host_permissions.indexOf("<all_urls>") === -1
     && manifest34.host_permissions.every((h) => h.indexOf("*://*/*") === -1));
   const pngSize = (file) => {
@@ -1372,8 +1372,8 @@ async function main() {
   check("side panel open trigger uses openPanelOnActionClick",
     fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8").indexOf("openPanelOnActionClick: true") !== -1);
   const readme34 = fs.readFileSync(path.join(DIR, "..", "README.md"), "utf8");
-  check("README states version 0.4.4 and has no em or en dashes",
-    readme34.indexOf("0.4.4") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
+  check("README states version 0.4.5 and has no em or en dashes",
+    readme34.indexOf("0.4.5") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
   // Security: no code execution from data, no secrets, no trackers.
   const allJs34 = ["popup.js", "background.js", "jcr.js", "shared.js", "net.js", "freedata.js"]
     .map((f) => fs.readFileSync(path.join(DIR, "..", f), "utf8")).join("\n");
@@ -1673,8 +1673,8 @@ async function main() {
     panel36.indexOf('id="hec-file"') !== -1 && panel36.indexOf('id="hec-import"') !== -1
     && panel36.indexOf('id="hec-status"') !== -1 && panel36.indexOf("Import HEC data") !== -1);
   const manifest36 = JSON.parse(fs.readFileSync(path.join(DIR, "..", "manifest.json"), "utf8"));
-  check("manifest: doaj.org host permission added, version 0.4.4",
-    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.4");
+  check("manifest: doaj.org host permission added, version 0.4.5",
+    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.5");
 
   console.log("== 37. Batch fixes: SJR ultra-fast shared tab, first-tab leak, WoS progress, full-tab progress, WoS button, saved-status, 57/40 (28 Nov 2026) ==");
   // The user ran the v0.4.3 Naqqash batch (65 articles) and
@@ -2100,6 +2100,49 @@ async function main() {
     delete global.fetchSjrCsvInTabSingle;
     delete global.fetchSjrCsvInTab;
   }
+
+  console.log("== 38. Per-year SJR fetch timer (28 Nov 2026) ==");
+  // The user tested v0.4.4 in real Chrome: one shared page for
+  // the whole batch, and all 11 years take almost the same time.
+  // So the timer shows the per-year fixed cost in the batch tag
+  // ("SJR 2017 saved, 41,551 rows, 14s") and a cache hit reads
+  // "SJR 2017 from cache, 0s", so the next run shows exactly
+  // where the seconds go.
+  check("sjrElapsedSec rounds to whole seconds and never goes negative",
+    DATA.sjrElapsedSec(1000, 1000) === 0
+    && DATA.sjrElapsedSec(1000, 1499) === 0
+    && DATA.sjrElapsedSec(1000, 1500) === 1
+    && DATA.sjrElapsedSec(0, 14000) === 14
+    && DATA.sjrElapsedSec(0, 14500) === 15
+    && DATA.sjrElapsedSec(5000, 1000) === 0);
+  check("sjrElapsedSec works on real Date.now-scale values (no 32-bit wrap)",
+    DATA.sjrElapsedSec(1764320000000, 1764320014000) === 14
+    && DATA.sjrElapsedSec(1764320000000, 1764320000500) === 1);
+  check("sjrOutcomeText: fetched with seconds names rows and time",
+    DATA.sjrOutcomeText("fetched", 2017, 41551, "", 14) === "SJR 2017 saved, 41,551 rows, 14s"
+    && DATA.sjrOutcomeText("fetched", 2017, 0, "", 9) === "SJR 2017 saved, 9s");
+  check("sjrOutcomeText: ready with seconds reads from cache",
+    DATA.sjrOutcomeText("ready", 2017, 0, "", 0) === "SJR 2017 from cache, 0s"
+    && DATA.sjrOutcomeText("ready", 2017, 0, "", 1) === "SJR 2017 from cache, 1s");
+  check("sjrOutcomeText: without seconds the old text is unchanged",
+    DATA.sjrOutcomeText("fetched", 2021, 51835) === "SJR 2021 saved, 51,835 rows"
+    && DATA.sjrOutcomeText("ready", 2021) === "SJR 2021 already saved");
+  check("sjrOutcomeText: a failed year does not get a time",
+    DATA.sjrOutcomeText("blocked", 2021, 0, "", 30) === "SJR 2021 could not be downloaded automatically — tap Get free SJR data or Open SJR download page");
+  check("sjrLatestOutcomeText: latest year carries its seconds, cache hit included",
+    DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551, seconds: 14 }]])) === "SJR 2017 saved, 41,551 rows, 14s"
+    && DATA.sjrLatestOutcomeText(new Map([[2017, { state: "ready", year: 2017, seconds: 0 }]])) === "SJR 2017 from cache, 0s"
+    && DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551, seconds: 14 }], [2018, { state: "ready", year: 2018, seconds: 0 }]])) === "SJR 2018 from cache, 0s"
+    && DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551 }]])) === "SJR 2017 saved, 41,551 rows");
+  const popupJs38 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  check("ensureSjrYear times every fetch path and the ready cache hit",
+    popupJs38.indexOf("const fetchStartedAt = Date.now();") !== -1
+    && popupJs38.indexOf("const timed = (o) => { o.seconds = DATA.sjrElapsedSec(fetchStartedAt, Date.now()); return o; };") !== -1
+    && popupJs38.indexOf("return timed({ state: \"fetched\"") !== -1
+    && popupJs38.indexOf("return timed({ state: \"blocked\"") !== -1
+    && popupJs38.indexOf("{ state: \"ready\", year: y, seconds: DATA.sjrElapsedSec(enteredAt, Date.now()) }") !== -1);
+  check("single lookup status uses the timed outcome text",
+    popupJs38.indexOf("DATA.sjrOutcomeText(\"fetched\", data.year, ensured.rows, ensured.detail, ensured.seconds)") !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));

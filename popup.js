@@ -146,13 +146,22 @@ async function isSjrClearanceFresh() {
 // Concurrent calls for the same year share one fetch.
 async function ensureSjrYear(year) {
   const y = parseInt(year, 10);
+  const enteredAt = Date.now();
   if (!y) return { state: "invalid", year: y };
   if (y > sjrLatestYear()) return { state: "not-released", year: y };
   try {
     const meta = await getStore().getMeta();
-    if (DATA.sjrFilesCoverYear(meta, y)) return { state: "ready", year: y };
+    // Already stored: a cache hit, so the timer is the store
+    // check itself, which reads as 0s.
+    if (DATA.sjrFilesCoverYear(meta, y)) return { state: "ready", year: y, seconds: DATA.sjrElapsedSec(enteredAt, Date.now()) };
   } catch (err) { /* fall through and try the fetch */ }
   if (sjrFetchInFlight.has(y)) return sjrFetchInFlight.get(y);
+  // Per-year fetch timer (28 Nov 2026, for testing): the clock
+  // starts when this year's fetch begins and stops when its
+  // rows are stored, so the batch tag shows where the seconds
+  // go ("SJR 2017 saved, 41,551 rows, 14s").
+  const fetchStartedAt = Date.now();
+  const timed = (o) => { o.seconds = DATA.sjrElapsedSec(fetchStartedAt, Date.now()); return o; };
   const run = (async () => {
     let res = null;
     if (!(await isSjrClearanceFresh())) {
@@ -160,7 +169,7 @@ async function ensureSjrYear(year) {
     }
     if (res && res.rows) {
       refreshImportStatus();
-      return { state: "fetched", year: y, rows: res.rows };
+      return timed({ state: "fetched", year: y, rows: res.rows });
     }
     if (!res || (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
       // Tab budget 180s: background tab (load <= 20s + poll
@@ -173,7 +182,7 @@ async function ensureSjrYear(year) {
       res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 180000);
       if (res && res.rows) {
         refreshImportStatus();
-        return { state: "fetched", year: y, rows: res.rows };
+        return timed({ state: "fetched", year: y, rows: res.rows });
       }
       // The message may have timed out while the worker kept
       // going and stored the file late: re-check the store
@@ -183,13 +192,13 @@ async function ensureSjrYear(year) {
         const meta2 = await getStore().getMeta();
         if (DATA.sjrFilesCoverYear(meta2, y)) {
           refreshImportStatus();
-          return { state: "fetched", year: y, rows: meta2.sjrRows };
+          return timed({ state: "fetched", year: y, rows: meta2.sjrRows });
         }
       } catch (err) { /* fall through to blocked */ }
-      if (res && res.error === "challenge") return { state: "challenge", year: y, detail: res.detail || "" };
-      return { state: "blocked", year: y, detail: res && res.detail ? res.detail : "" };
+      if (res && res.error === "challenge") return timed({ state: "challenge", year: y, detail: res.detail || "" });
+      return timed({ state: "blocked", year: y, detail: res && res.detail ? res.detail : "" });
     }
-    return { state: "failed", year: y };
+    return timed({ state: "failed", year: y });
   })();
   sjrFetchInFlight.set(y, run);
   try { return await run; } finally { sjrFetchInFlight.delete(y); }
@@ -415,7 +424,7 @@ async function showResult(data, sourceName, opts) {
     if (ensured.state === "fetched" || ensured.state === "ready") {
       rank = await safeGetRank(data.issns, parseInt(data.year, 10));
       if (ensured.state === "fetched" && statusEl) {
-        statusEl.textContent = `SJR ${data.year} saved${ensured.rows ? ", " + Number(ensured.rows).toLocaleString("en-US") + " rows" : ""}.`;
+        statusEl.textContent = DATA.sjrOutcomeText("fetched", data.year, ensured.rows, ensured.detail, ensured.seconds);
       }
     } else if (ensured.state === "not-released" || ensured.state === "blocked" || ensured.state === "challenge") {
       sjrNote = ensured.state === "not-released" ? "not-released" : "blocked";

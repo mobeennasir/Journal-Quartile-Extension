@@ -1081,10 +1081,22 @@
     return "";
   }
 
-  function sjrOutcomeText(state, year, rows, detail) {
+  // Per-year SJR fetch timer (28 Nov 2026, user asked for it
+  // for testing): whole seconds between the fetch starting and
+  // the year's rows being stored, rounded, never negative.
+  // 499 ms reads as 0s, 500 ms as 1s.
+  function sjrElapsedSec(startedAtMs, endedAtMs) {
+    const s = Math.round((Number(endedAtMs) - Number(startedAtMs)) / 1000);
+    return (s < 0 || !isFinite(s)) ? 0 : s;
+  }
+
+  function sjrOutcomeText(state, year, rows, detail, seconds) {
+    const timed = typeof seconds === "number";
     switch (state) {
-      case "ready": return "SJR " + year + " already saved";
-      case "fetched": return "SJR " + year + " saved" + (rows ? ", " + Number(rows).toLocaleString("en-US") + " rows" : "");
+      case "ready": return timed
+        ? "SJR " + year + " from cache, " + seconds + "s"
+        : "SJR " + year + " already saved";
+      case "fetched": return "SJR " + year + " saved" + (rows ? ", " + Number(rows).toLocaleString("en-US") + " rows" : "") + (timed ? ", " + seconds + "s" : "");
       case "blocked": case "challenge": case "failed": {
         const reason = detail ? sjrBlockReason(detail) : "";
         return "SJR " + year + " could not be downloaded automatically — tap Get free SJR data or Open SJR download page" + (reason ? " (" + reason + ")" : "");
@@ -1107,7 +1119,7 @@
       : (Array.isArray(outcomes) ? outcomes : []);
     if (!entries.length) return "";
     const last = entries[entries.length - 1];
-    return sjrOutcomeText(last[1].state, last[0], last[1].rows, last[1].detail) || "";
+    return sjrOutcomeText(last[1].state, last[0], last[1].rows, last[1].detail, last[1].seconds) || "";
   }
 
   // ---------- Batch resume point (pure, unit-tested) ----------
@@ -1353,7 +1365,7 @@
     MemoryStore: MemoryStore, IdbStore: IdbStore,
     lookupRankSync: lookupRankSync,
     RESULTS_HEADER: RESULTS_HEADER, resultsToCsv: resultsToCsv,
-    sjrOutcomeText: sjrOutcomeText, sjrLatestOutcomeText: sjrLatestOutcomeText, sjrBlockReason: sjrBlockReason, notFoundBreakdown: notFoundBreakdown,
+    sjrOutcomeText: sjrOutcomeText, sjrLatestOutcomeText: sjrLatestOutcomeText, sjrBlockReason: sjrBlockReason, sjrElapsedSec: sjrElapsedSec, notFoundBreakdown: notFoundBreakdown,
     batchResumePoint: batchResumePoint,
     nextJcrExpiry: nextJcrExpiry,
     sjrExpiresAt: sjrExpiresAt, mjlExpiresAt: mjlExpiresAt,
