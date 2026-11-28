@@ -477,17 +477,32 @@ async function fetchMjlCategory(issns, journal) {
   // 0. Store first: a journal fetched before — by a single
   // lookup, a batch, or the retry button — is answered from
   // IndexedDB with no tab opened and no MJL page read. This is
-  // what makes the next lookup instant.
+  // what makes the next lookup instant. A stored "not
+  // indexed" answer (30 days, tab-confirmed) answers here
+  // too, with notIndexed: true and no category.
   try {
     const stored = await new FDATA.IdbStore().getMjl(list);
     if (stored) {
-      const hit = { category: stored.category, index: stored.index, issn: stored.issn, stored: true };
-      if (cacheKey) mjlCategoryCache.set(cacheKey, hit);
+      // fromCache marks a stored answer (no MJL fetch at all):
+      // the panel counts it separately from live fetches, so
+      // the WoS pass can say how many came from the store.
+      const hit = { category: stored.category, index: stored.index, issn: stored.issn, stored: true, fromCache: true };
+      if (stored.notIndexed) hit.notIndexed = true;
+      // Only a category is cached in memory: a stored
+      // negative is re-read from IndexedDB each time, so
+      // its 30-day expiry is honoured for the worker's
+      // whole lifetime instead of being frozen at first read.
+      if (cacheKey && stored.category) mjlCategoryCache.set(cacheKey, hit);
       return hit;
     }
   } catch (err) { /* fall through to the live check */ }
   let result = null;
   let sawUnreadable = false;
+  // Whether a tab already rendered a stable not-indexed
+  // result for these ISSNs. When true, no second tab is
+  // opened: one stable reading is enough (see the retry
+  // note below).
+  let tabConfirmed = false;
   for (const issn of list) {
     let res;
     try {
@@ -516,23 +531,34 @@ async function fetchMjlCategory(issns, journal) {
     // the rendered page in the user's browser instead.
     try {
       result = await fetchMjlCategoryViaTab(list);
+      // The tab path only reports not-indexed after a STABLE
+      // rendered reading (2 consecutive polls, >=8s after
+      // load), so this answer is already confirmed.
+      if (result && !result.error) tabConfirmed = true;
     } catch (err) {
       result = { error: sawUnreadable ? "unreadable" : "network" };
     }
     if (!result.error && !result.category && !result.notIndexed) {
       result = { error: sawUnreadable ? "unreadable" : "network" };
     }
-    // A "not indexed" answer is retried once in a fresh tab:
-    // a throttled background tab can still render the initial
-    // "Found 0 results" state even after the stability wait,
-    // and a false negative here would wrongly mark an indexed
-    // journal as not in WoS (the 3 SCIE misses, 27 Nov 2026).
-    if (result && result.notIndexed) {
-      try {
-        const retry = await fetchMjlCategoryViaTab(list);
-        if (retry && retry.category) result = retry;
-      } catch (err) { /* keep the first answer */ }
-    }
+  }
+  // A "not indexed" answer is confirmed once in a tab ONLY
+  // when it came from the plain fetch (the Angular shell can
+  // carry a stale "0 results" line, so the shell alone is
+  // not evidence). When the first tab already rendered a
+  // stable not-indexed result, one tab is enough — the old
+  // code opened a second tab for every miss, so a journal
+  // genuinely not in WoS paid two full waits on every
+  // lookup (NUST Journal of Natural Sciences opened the
+  // MJL tab again and again, 28 Nov 2026). A tab that
+  // errors or is blocked does not confirm anything, so the
+  // answer stays unconfirmed and is not stored.
+  if (result && result.notIndexed && !tabConfirmed) {
+    try {
+      const retry = await fetchMjlCategoryViaTab(list);
+      if (retry && retry.category) result = retry;
+      else if (retry && retry.notIndexed) tabConfirmed = true;
+    } catch (err) { /* keep the first answer */ }
   }
   // Save every successful category result HERE, in the worker:
   // the single save point for every caller (single lookup,
@@ -550,10 +576,28 @@ async function fetchMjlCategory(issns, journal) {
       result.stored = true;
     } catch (err) { result.stored = false; }
   }
-  // Only a successful category is cached in memory: a
-  // "not indexed" or error answer must never poison later
-  // lookups for the worker's lifetime — a retry (manual button
-  // or next batch) has to be able to find the journal.
+  // A stable not-indexed answer is stored too, for 30 days
+  // (FDATA.mjlNotIndexedExpiresAt): a journal genuinely not
+  // in WoS paid a full tab wait on EVERY lookup before this
+  // (NUST Journal of Natural Sciences, 28 Nov 2026). Only
+  // a tab-confirmed answer is stored — never a timeout,
+  // error, challenge page, or shell parse. The row is
+  // marked notIndexed and carries no category, so it can
+  // never read as a W/X; the status count and the CSV keep
+  // showing blank WoS.
+  if (result && result.notIndexed && tabConfirmed) {
+    try {
+      await saveMjlNotIndexed(list, journal);
+      result.stored = true;
+    } catch (err) { /* stored stays unset; next lookup re-checks */ }
+  }
+  // Only a successful category is cached in memory. A
+  // "not indexed" answer lives in IndexedDB with its own
+  // 30-day expiry instead: memory-caching it would freeze
+  // the expiry for the worker's lifetime, and an error
+  // answer must never poison later lookups — a retry
+  // (manual button or next batch) has to be able to find
+  // the journal.
   if (cacheKey && result && result.category) mjlCategoryCache.set(cacheKey, result);
   return result;
 }
@@ -572,6 +616,26 @@ async function saveMjlCategory(result, issns, journal) {
   }));
   if (!rows.length) return;
   await new FDATA.IdbStore().putMjl(rows, { fileName: "Master Journal List (automatic)", rows: rows.length, importedAt, expires });
+}
+
+// One stored "not indexed" answer per journal: rows under
+// every ISSN of that journal (print + online), marked
+// notIndexed, no category, 30-day expiry. No file meta is
+// saved: the "N journals stored" status counts categorised
+// rows only, and a negative must never move that count or
+// its "Valid until" date.
+async function saveMjlNotIndexed(issns, journal) {
+  const importedAt = new Date().toISOString();
+  const expires = FDATA.mjlNotIndexedExpiresAt(importedAt);
+  const rows = (issns || []).filter(Boolean).map((issn) => ({
+    issn, journal: journal || "", year: null, quartile: "",
+    jif: null, wosIndex: "", wosCategory: "",
+    notIndexed: true, notIndexedAt: importedAt,
+    category: "", sourceFile: "Master Journal List (automatic)", editionYear: null,
+    importedAt, expires,
+  }));
+  if (!rows.length) return;
+  await new FDATA.IdbStore().putMjl(rows);
 }
 
 // ---------- HEC fallback (Y via DOAJ) ----------
@@ -1227,12 +1291,20 @@ function recordSjrTabFetch(outcome) {
 // is read from any closure, so there is no cross-call persistence
 // to fail.
 //
-// Permission path: this does NOT rely on activeTab alone. The
-// manifest grants host_permissions for the publisher origins
-// (*.sciencedirect.com, *.nature.com, etc.), and
-// chrome.scripting.executeScript is allowed on any origin the
-// extension has a host permission for — no activeTab grant needed.
-// activeTab is only a fallback for origins outside that list.
+// Permission path: the manifest grants host_permissions
+// for the publisher origins (*.sciencedirect.com,
+// *.nature.com, etc.), and chrome.scripting.executeScript
+// is allowed on any origin the extension has a host
+// permission for. Any other journal site (e.g.
+// njns.nust.edu.pk) is NOT covered, so the read fails with
+// "Cannot access contents ... must request permission to
+// access this host". That is not a bug in the read: the
+// worker answers { error: "needs-permission", origin },
+// and the panel asks the user for that origin once via
+// chrome.permissions.request (optional_host_permissions
+// in the manifest), then retries. No per-publisher list:
+// any journal site works after one grant, and a declined
+// grant falls back to pasting the DOI.
 async function checkThisPage(sendResponse) {
   try {
     if (!chrome.scripting || !chrome.scripting.executeScript) {
@@ -1264,7 +1336,8 @@ async function checkThisPage(sendResponse) {
       return;
     }
     let host = "";
-    try { host = new URL(tab.url).hostname; } catch (err) { /* ignore */ }
+    let origin = "";
+    try { const u = new URL(tab.url); host = u.hostname; origin = u.origin; } catch (err) { /* ignore */ }
 
     // ONE executeScript call, `func` only — no `files`. The func is
     // fully self-contained (see the root-cause note above): it
@@ -1326,17 +1399,30 @@ async function checkThisPage(sendResponse) {
         },
       });
     } catch (err) {
+      const detail = String(err && err.message || err);
+      // A journal site the manifest does not cover: the
+      // panel asks the user for that origin once and
+      // retries. Anything else is a genuine read failure.
+      if (FDATA && FDATA.isHostPermissionError(detail)) {
+        sendResponse({ doi: null, error: "needs-permission", host, origin });
+        return;
+      }
       sendResponse({
         doi: null, error: "inject-extract-failed", host,
-        detail: String(err && err.message || err),
+        detail,
       });
       return;
     }
     const firstResult = results && results[0];
     if (firstResult && firstResult.error) {
+      const detail = String(firstResult.error.message || firstResult.error);
+      if (FDATA && FDATA.isHostPermissionError(detail)) {
+        sendResponse({ doi: null, error: "needs-permission", host, origin });
+        return;
+      }
       sendResponse({
         doi: null, error: "inject-extract-failed", host,
-        detail: String(firstResult.error.message || firstResult.error),
+        detail,
       });
       return;
     }
@@ -1371,16 +1457,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message && message.type === "fetchSjrExport") {
     (async () => {
       const year = message.year || FREE.sjrLatestYear();
+      // TEMPORARY (28 Nov 2026): per-phase timing for the
+      // diagnostic tag — the tab path already returns this
+      // shape, the direct path did not. Removed with the rest
+      // of the time display after the diagnosis.
+      const startedAt = Date.now();
       const fetched = await fetchSjrYear(year);
+      const fetchMs = Date.now() - startedAt;
       if (fetched.error) {
-        sendResponse({ error: fetched.error, year });
+        sendResponse({ error: fetched.error, year, timing: { tabMs: 0, fetchMs, importMs: 0, totalMs: Date.now() - startedAt } });
         return;
       }
       try {
+        const importStartedAt = Date.now();
         const done = await importSjrText(fetched.text, year);
-        sendResponse({ rows: done.rows, skipped: done.skipped, warnings: done.warnings, year });
+        const importMs = Date.now() - importStartedAt;
+        sendResponse({ rows: done.rows, skipped: done.skipped, warnings: done.warnings, year, timing: { tabMs: 0, fetchMs, importMs, totalMs: Date.now() - startedAt } });
       } catch (err) {
-        sendResponse({ error: "failed", year, detail: String(err && err.message || err) });
+        sendResponse({ error: "failed", year, detail: String(err && err.message || err), timing: { tabMs: 0, fetchMs, importMs: 0, totalMs: Date.now() - startedAt } });
       }
     })().catch((err) => sendResponse({ error: "failed", detail: String(err && err.message || err) }));
     return true;

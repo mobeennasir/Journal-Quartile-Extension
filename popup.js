@@ -38,6 +38,9 @@ const batchRunBtn = document.getElementById("batch-run");
 const batchTestsetBtn = document.getElementById("batch-testset");
 const batchStatusEl = document.getElementById("batch-status");
 const batchSjrStatusEl = document.getElementById("batch-sjr-status");
+// TEMPORARY (28 Nov 2026, for testing): per-year SJR timer
+// list under the status area, removed after the diagnosis.
+const batchSjrYearsEl = document.getElementById("batch-sjr-years");
 const batchProgressEl = document.getElementById("batch-progress");
 const batchProgressBarEl = document.getElementById("batch-progress-bar");
 const batchResultsEl = document.getElementById("batch-results");
@@ -68,6 +71,7 @@ const sjrFetchBtn = document.getElementById("sjr-fetch");
 const sjrOpenPageBtn = document.getElementById("sjr-open-page");
 const mjlFetchBtn = document.getElementById("mjl-fetch");
 const batchMjlBtn = document.getElementById("batch-mjl");
+const batchMjlNoteEl = document.getElementById("batch-mjl-note");
 const batchStopBtn = document.getElementById("batch-stop");
 const batchResumeBtn = document.getElementById("batch-resume");
 
@@ -169,7 +173,7 @@ async function ensureSjrYear(year) {
     }
     if (res && res.rows) {
       refreshImportStatus();
-      return timed({ state: "fetched", year: y, rows: res.rows });
+      return timed({ state: "fetched", year: y, rows: res.rows, timing: res.timing });
     }
     if (!res || (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
       // Tab budget 180s: background tab (load <= 20s + poll
@@ -182,7 +186,7 @@ async function ensureSjrYear(year) {
       res = await sendBackgroundMessage({ type: "fetchSjrViaTab", year: y }, 180000);
       if (res && res.rows) {
         refreshImportStatus();
-        return timed({ state: "fetched", year: y, rows: res.rows });
+        return timed({ state: "fetched", year: y, rows: res.rows, timing: res.timing });
       }
       // The message may have timed out while the worker kept
       // going and stored the file late: re-check the store
@@ -424,7 +428,7 @@ async function showResult(data, sourceName, opts) {
     if (ensured.state === "fetched" || ensured.state === "ready") {
       rank = await safeGetRank(data.issns, parseInt(data.year, 10));
       if (ensured.state === "fetched" && statusEl) {
-        statusEl.textContent = DATA.sjrOutcomeText("fetched", data.year, ensured.rows, ensured.detail, ensured.seconds);
+        statusEl.textContent = DATA.sjrOutcomeText("fetched", data.year, ensured.rows, ensured.detail, ensured.seconds, ensured.timing);
       }
     } else if (ensured.state === "not-released" || ensured.state === "blocked" || ensured.state === "challenge") {
       sjrNote = ensured.state === "not-released" ? "not-released" : "blocked";
@@ -844,19 +848,28 @@ async function onCheckPageClick() {
       showError("“Check this page” needs the extension running in Chrome. Paste the DOI or link above instead.");
       return;
     }
-    const response = await new Promise((resolve) => {
-      let done = false;
-      const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 20000);
-      chrome.runtime.sendMessage({ type: "checkThisPage" }, (res) => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        resolve(res || null);
-      });
-    });
+    let response = await sendCheckPageMessage();
     if (!response) {
       showError("No answer from the extension. Reload the extension and try again.");
       return;
+    }
+    // A journal site the manifest does not cover (e.g.
+    // njns.nust.edu.pk): Chrome refused the read until
+    // that origin is granted once. The request runs here,
+    // in this click, so Chrome shows its prompt; a grant
+    // is kept, so the next tap on any article on that site
+    // just works. Declined: paste the DOI instead.
+    if (response.error === "needs-permission" && response.origin) {
+      const granted = await requestHostPermission(response.origin);
+      if (!granted) {
+        showError(`“Check this page” needs permission for ${response.host || "this site"}. Copy the DOI from the article page and paste it above.`);
+        return;
+      }
+      response = await sendCheckPageMessage();
+      if (!response) {
+        showError("No answer from the extension. Reload the extension and try again.");
+        return;
+      }
     }
     if (response.doi) {
       inputEl.value = response.doi;
@@ -879,6 +892,34 @@ async function onCheckPageClick() {
     }
   } finally {
     setLoading(false);
+  }
+}
+
+// One "Check this page" round trip to the worker (20s cap).
+function sendCheckPageMessage() {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 20000);
+    chrome.runtime.sendMessage({ type: "checkThisPage" }, (res) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(res || null);
+    });
+  });
+}
+
+// Ask Chrome for one journal origin, once, from the user's
+// tap (optional_host_permissions in the manifest). Returns
+// true when granted — including when it was already granted,
+// in which case Chrome shows no prompt. False when declined
+// or unavailable.
+async function requestHostPermission(origin) {
+  if (!origin || typeof chrome === "undefined" || !chrome.permissions || !chrome.permissions.request) return false;
+  try {
+    return !!(await chrome.permissions.request({ origins: [origin + "/*"] }));
+  } catch (err) {
+    return false;
   }
 }
 
@@ -1456,18 +1497,51 @@ function offerBatchResume(saved) {
   batchRunBtn.disabled = false;
   batchStatusEl.textContent = `Batch stopped at ${next} of ${saved.rows.length} articles. Resume to continue from where it stopped.`;
   if (batchResumeBtn) batchResumeBtn.hidden = false;
+  updateBatchRunButton();
   return true;
+}
+
+// Does a saved batch belong to the rows currently loaded?
+// Returns { startIndex, existingResults, saved } or null.
+function savedBatchResumeArgs() {
+  const saved = pendingBatchState;
+  if (!saved || !batchFileRows) return null;
+  const next = DATA.batchResumePoint(saved);
+  if (next < 0) return null;
+  if (!DATA.batchRowsMatch(saved.rows, batchFileRows)) return null;
+  return { startIndex: next, existingResults: saved.results, saved };
+}
+
+// Resume the saved batch for the currently loaded rows, if
+// there is one. Shared by the Resume button, the Run button
+// and the test-set button (28 Nov 2026: the Run button used
+// to restart from article 1 even with a saved batch of 65
+// articles on screen). Returns true when it resumed.
+async function resumeSavedBatch() {
+  const args = savedBatchResumeArgs();
+  if (!args) return false;
+  if (batchResumeBtn) batchResumeBtn.hidden = true;
+  pendingBatchState = null;
+  batchStatusEl.textContent = `Resuming batch at article ${args.startIndex + 1} of ${args.saved.rows.length}…`;
+  await runBatch(args.saved.rows, { startIndex: args.startIndex, existingResults: args.existingResults });
+  return true;
+}
+
+// The Run button says what it will do (28 Nov 2026): when it
+// will resume a saved batch it reads as a resume, with the
+// article it continues from; only a genuine fresh start reads
+// as upload/check-all. A button label must always name the
+// action it will actually take.
+function updateBatchRunButton() {
+  if (!batchRunBtn) return;
+  const args = savedBatchResumeArgs();
+  batchRunBtn.textContent = args
+    ? `Resume batch, from article ${args.startIndex + 1} of ${args.saved.rows.length}`
+    : "Upload and check all articles";
 }
 if (batchResumeBtn) {
   batchResumeBtn.addEventListener("click", async () => {
-    const saved = pendingBatchState;
-    if (!saved) return;
-    const next = DATA.batchResumePoint(saved);
-    if (next < 0) return;
-    batchResumeBtn.hidden = true;
-    pendingBatchState = null;
-    batchStatusEl.textContent = `Resuming batch at article ${next + 1} of ${saved.rows.length}…`;
-    await runBatch(saved.rows, { startIndex: next, existingResults: saved.results });
+    await resumeSavedBatch();
   });
 }
 if (batchStopBtn) {
@@ -1494,30 +1568,52 @@ batchFileEl.addEventListener("change", async () => {
   const file = batchFileEl.files && batchFileEl.files[0];
   batchFileNameEl.textContent = file ? file.name : "No file chosen.";
   batchRunBtn.disabled = !file;
+  // Keep the saved batch until the new file is read: if the
+  // new rows match the saved batch, the resume offer survives
+  // (28 Nov 2026 — choosing the same file again used to wipe
+  // it). A different file replaces it, and the status says so.
+  const previousSaved = pendingBatchState;
   batchFileRows = null;
-  // A new file replaces any saved batch: no stale resume offer.
-  clearBatchState();
   pendingBatchState = null;
   if (batchResumeBtn) batchResumeBtn.hidden = true;
-  if (!file) return;
+  if (!file) { clearBatchState(); updateBatchRunButton(); return; }
   const typeError = wrongTypeMessage(file, ARTICLE_FILE_TYPES, "the article list");
   if (typeError) {
     batchStatusEl.textContent = typeError;
     batchStatusEl.classList.add("error");
     batchRunBtn.disabled = true;
+    clearBatchState();
+    updateBatchRunButton();
     return;
   }
   try {
     const text = await readSpreadsheetFile(file);
     const parsed = DATA.parseArticleListText(text);
     batchFileRows = parsed.rows;
-    batchStatusEl.textContent = parsed.rows.length
-      ? `${parsed.rows.length} article(s) in ${file.name}. Press “Upload and check all articles”.`
-      : `No articles found in ${file.name}. ${parsed.warnings.join(" ")} Check the columns: title, journal, year, DOI.`;
+    if (parsed.rows.length && previousSaved && DATA.batchRowsMatch(previousSaved.rows, parsed.rows)) {
+      pendingBatchState = previousSaved;
+      if (batchResumeBtn) batchResumeBtn.hidden = false;
+      const next = DATA.batchResumePoint(previousSaved);
+      batchStatusEl.textContent = `${parsed.rows.length} article(s) in ${file.name}. Saved batch matches this file — press “Resume batch, from article ${next + 1} of ${parsed.rows.length}” to continue.`;
+    } else {
+      if (previousSaved) {
+        clearBatchState();
+        batchStatusEl.textContent = parsed.rows.length
+          ? `${parsed.rows.length} article(s) in ${file.name}. Different file from the saved batch — starting fresh. Press “Upload and check all articles”.`
+          : `No articles found in ${file.name}. ${parsed.warnings.join(" ")} Check the columns: title, journal, year, DOI.`;
+      } else {
+        batchStatusEl.textContent = parsed.rows.length
+          ? `${parsed.rows.length} article(s) in ${file.name}. Press “Upload and check all articles”.`
+          : `No articles found in ${file.name}. ${parsed.warnings.join(" ")} Check the columns: title, journal, year, DOI.`;
+      }
+    }
     batchStatusEl.classList.toggle("error", !parsed.rows.length);
+    updateBatchRunButton();
   } catch (err) {
     batchStatusEl.textContent = `Could not read ${file.name}: ${err.message}`;
     batchStatusEl.classList.add("error");
+    clearBatchState();
+    updateBatchRunButton();
   }
 });
 
@@ -1559,9 +1655,13 @@ function batchRowToResult(row, found, rank, note, sjrState) {
 // replaced each time a year's data resolves — never a paragraph
 // listing every saved year (user, 27 Nov 2026). The tag lives
 // in the status area only, never in the article results.
+// TEMPORARY (28 Nov 2026, for testing): the per-year list
+// under it shows every year's line, so no year's time scrolls
+// past unseen. The list is removed after the diagnosis; the
+// single tag stays.
 function updateBatchSjrStatus(outcomes) {
-  if (!batchSjrStatusEl) return;
-  batchSjrStatusEl.textContent = DATA.sjrLatestOutcomeText(outcomes);
+  if (batchSjrStatusEl) batchSjrStatusEl.textContent = DATA.sjrLatestOutcomeText(outcomes);
+  if (batchSjrYearsEl) batchSjrYearsEl.textContent = DATA.sjrYearListText(outcomes);
 }
 
 async function runBatch(rows, opts) {
@@ -1588,7 +1688,9 @@ async function runBatch(rows, opts) {
   // button when a new batch starts.
   batchDownloadBtn.hidden = true;
   if (batchMjlBtn) batchMjlBtn.hidden = true;
+  if (batchMjlNoteEl) batchMjlNoteEl.textContent = "";
   if (batchSjrStatusEl) batchSjrStatusEl.textContent = "";
+  if (batchSjrYearsEl) batchSjrYearsEl.textContent = ""; // TEMPORARY list, cleared per run
   batchRunBtn.disabled = true;
   batchTestsetBtn.disabled = true;
   let resolvedDoi = 0, found = 0;
@@ -1613,6 +1715,15 @@ async function runBatch(rows, opts) {
   const prefetchNext = () => {
     if (prefetchIdx >= batchYears.length) return Promise.resolve();
     const y = batchYears[prefetchIdx++];
+    // TEMPORARY (28 Nov 2026): mark the year as fetching so
+    // the tag shows "Getting SJR data for {year}…" while the
+    // 20-30s fetch runs, instead of the previous year's stale
+    // number. The outcome replaces it when the year resolves.
+    if (!sjrYearOutcomes.has(y)) {
+      sjrYearOutcomes.set(y, { state: "fetching", year: y });
+      updateBatchSjrStatus(sjrYearOutcomes);
+      saveBatchLiveState(false);
+    }
     return ensureSjrYear(y).then((o) => {
       sjrYearOutcomes.set(y, o);
       updateBatchSjrStatus(sjrYearOutcomes);
@@ -1622,10 +1733,16 @@ async function runBatch(rows, opts) {
   for (let k = 0; k < 3; k++) prefetchNext();
   let finished = false;
   let stopped = false;
+  // TEMPORARY (28 Nov 2026): per-article time — how long the
+  // previous row took (the Crossref/OpenAlex lookup per
+  // article), shown next to the article counter. Removed after
+  // the diagnosis.
+  let lastArticleSeconds = null;
   try {
   for (let i = startIndex; i < rows.length; i++) {
     const row = rows[i];
-    setBatchStatus(`Checking article ${i + 1} of ${rows.length}: ${row.title.slice(0, 60)}…`);
+    const rowStartedAt = Date.now();
+    setBatchStatus(DATA.batchArticleStatusText(i + 1, rows.length, row.title, lastArticleSeconds));
     batchProgressBarEl.style.width = Math.round((i / rows.length) * 100) + "%";
     saveBatchLiveState(false);
     let result;
@@ -1683,6 +1800,12 @@ async function runBatch(rows, opts) {
             ensured = sjrYearOutcomes.get(year);
           } else {
             setBatchStatus(`Checking article ${i + 1} of ${rows.length}: getting SJR data for ${year}…`);
+            // TEMPORARY (28 Nov 2026): mark the year as fetching
+            // so the tag shows "Getting SJR data for {year}…"
+            // while the fetch runs.
+            sjrYearOutcomes.set(year, { state: "fetching", year });
+            updateBatchSjrStatus(sjrYearOutcomes);
+            saveBatchLiveState(false);
             ensured = await ensureSjrYear(year);
             sjrYearOutcomes.set(year, ensured);
             updateBatchSjrStatus(sjrYearOutcomes);
@@ -1714,6 +1837,9 @@ async function runBatch(rows, opts) {
       result = batchRowToResult(row, null, null, "Network error: " + String(err.message || err));
       result.notFoundKind = "network";
     }
+    // TEMPORARY (28 Nov 2026): per-article time, stopped here
+    // so the 500 ms polite pacing below does not count.
+    lastArticleSeconds = DATA.sjrElapsedSec(rowStartedAt, Date.now());
     batchResults.push(result);
     // Persist after every row: if the panel closes, the tab
     // reloads, or the browser restarts, the rows already checked
@@ -1738,6 +1864,7 @@ async function runBatch(rows, opts) {
     setBatchStatus("Batch stopped early — results are incomplete, download is hidden.");
     saveBatchLiveState(true);
     sendSweepTabs();
+    updateBatchRunButton();
     return;
   }
   if (stopped) {
@@ -1749,16 +1876,26 @@ async function runBatch(rows, opts) {
     // batch finishes or a new file replaces it.
     if (batchStopBtn) batchStopBtn.hidden = true;
     batchResultsEl.hidden = false;
-    if (batchMjlBtn) { batchMjlBtn.hidden = false; batchMjlBtn.disabled = true; }
+    // The button stays hidden while the automatic WoS pass
+    // runs (28 Nov 2026): it is a manual re-check, shown only
+    // after the pass, and only when rows still need a check
+    // (updateBatchMjlButton below).
+    if (batchMjlBtn) { batchMjlBtn.hidden = true; batchMjlBtn.disabled = true; }
     batchProgressBarEl.style.width = Math.round((batchResults.length / rows.length) * 100) + "%";
     const stoppedPrefix = `Batch stopped at ${batchResults.length} of ${rows.length} articles — results are partial.`;
     setBatchStatus(stoppedPrefix + " Fetching WoS categories…");
     const wosStopped = await fetchBatchWoSCategories((p) => {
-      setBatchStatus(stoppedPrefix + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound));
+      // The bar moves with the WoS pass too (28 Nov 2026): it
+      // used to stay full from the article phase and not move
+      // at all while WoS categories were fetching.
+      if (batchProgressBarEl && p.total > 0) batchProgressBarEl.style.width = Math.round((p.checked / p.total) * 100) + "%";
+      setBatchStatus(stoppedPrefix + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound, p.cached));
     });
+    // Back to the partial article fraction once the pass ends.
+    batchProgressBarEl.style.width = Math.round((batchResults.length / rows.length) * 100) + "%";
     batchDownloadBtn.hidden = false;
     updateBatchMjlButton();
-    setBatchStatus(stoppedPrefix + " " + wosPassText(wosStopped) + " Resume to continue from where it stopped.");
+    setBatchStatus(stoppedPrefix + " " + DATA.wosPassText(wosStopped) + " Resume to continue from where it stopped.");
     // The Import section must show what the pass actually
     // saved, not the text from when the panel opened.
     refreshImportStatus();
@@ -1766,14 +1903,20 @@ async function runBatch(rows, opts) {
     sendSweepTabs();
     pendingBatchState = { rows: rows, results: batchResults.slice(), nextIndex: batchResults.length, savedAt: new Date().toISOString() };
     if (batchResumeBtn) batchResumeBtn.hidden = false;
+    updateBatchRunButton();
     saveBatchLiveState(true);
     return;
   }
   // Finished: no resume state to keep.
   clearBatchState();
+  updateBatchRunButton();
   if (batchStopBtn) batchStopBtn.hidden = true;
   batchResultsEl.hidden = false;
-  if (batchMjlBtn) { batchMjlBtn.hidden = false; batchMjlBtn.disabled = true; }
+  // The button stays hidden while the automatic WoS pass runs
+  // (28 Nov 2026): it is a manual re-check, shown only after
+  // the pass, and only when rows still need a check
+  // (updateBatchMjlButton below).
+  if (batchMjlBtn) { batchMjlBtn.hidden = true; batchMjlBtn.disabled = true; }
   batchProgressBarEl.style.width = "100%";
   updateBatchSjrStatus(sjrYearOutcomes);
   // The summary adds up: found rows split into JCR / SJR /
@@ -1793,11 +1936,16 @@ async function runBatch(rows, opts) {
   // The pass reports live progress in the same status area.
   setBatchStatus(batchSummary + " Fetching WoS categories…");
   const wos = await fetchBatchWoSCategories((p) => {
-    setBatchStatus(batchSummary + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound));
+    // The bar moves with the WoS pass too (28 Nov 2026): it
+    // used to stay full from the article phase and not move at
+    // all while WoS categories were fetching.
+    if (batchProgressBarEl && p.total > 0) batchProgressBarEl.style.width = Math.round((p.checked / p.total) * 100) + "%";
+    setBatchStatus(batchSummary + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound, p.cached));
   });
+  batchProgressBarEl.style.width = "100%";
   batchDownloadBtn.hidden = false;
   updateBatchMjlButton();
-  setBatchStatus(batchSummary + " " + wosPassText(wos));
+  setBatchStatus(batchSummary + " " + DATA.wosPassText(wos));
   // The Import section must show what the pass actually saved,
   // not the text from when the panel opened (the "not saved"
   // report, 28 Nov 2026: the rows WERE in the store, the
@@ -1823,6 +1971,8 @@ function buildCurrentBatchLiveState(finished) {
   return DATA.buildBatchLiveState({
     status: batchStatusEl ? batchStatusEl.textContent : "",
     sjrTag: batchSjrStatusEl ? batchSjrStatusEl.textContent : "",
+    sjrYears: batchSjrYearsEl ? batchSjrYearsEl.textContent : "",
+    mjlNote: batchMjlNoteEl ? batchMjlNoteEl.textContent : "",
     progressPct: batchProgressBarEl ? parseFloat(batchProgressBarEl.style.width) || 0 : 0,
     resultsHidden: batchResultsEl ? !!batchResultsEl.hidden : true,
     downloadHidden: batchDownloadBtn ? !!batchDownloadBtn.hidden : true,
@@ -1851,6 +2001,8 @@ function renderBatchLiveState(state) {
   if (!state) return;
   if (batchStatusEl && typeof state.status === "string") batchStatusEl.textContent = state.status;
   if (batchSjrStatusEl && typeof state.sjrTag === "string") batchSjrStatusEl.textContent = state.sjrTag;
+  if (batchSjrYearsEl && typeof state.sjrYears === "string") batchSjrYearsEl.textContent = state.sjrYears;
+  if (batchMjlNoteEl && typeof state.mjlNote === "string") batchMjlNoteEl.textContent = state.mjlNote;
   if (batchProgressBarEl && typeof state.progressPct === "number") batchProgressBarEl.style.width = state.progressPct + "%";
   if (batchResultsEl) batchResultsEl.hidden = !!state.resultsHidden;
   if (batchDownloadBtn) batchDownloadBtn.hidden = !!state.downloadHidden;
@@ -1900,6 +2052,10 @@ function updateBatchMjlButton() {
   const need = DATA.batchRowsNeedingWosCheck(batchResults);
   batchMjlBtn.hidden = need === 0;
   batchMjlBtn.disabled = false;
+  // The button is a manual re-check after the automatic pass:
+  // say so under it, with how many rows still need a check
+  // (28 Nov 2026).
+  if (batchMjlNoteEl) batchMjlNoteEl.textContent = DATA.mjlRecheckNoteText(need);
 }
 
 // Close any leftover SJR/MJL tab the extension opened (the
@@ -1914,6 +2070,9 @@ batchRunBtn.addEventListener("click", async () => {
     batchStatusEl.textContent = "Choose an Excel or CSV file first.";
     return;
   }
+  // A saved batch matching these rows resumes from where it
+  // stopped instead of restarting from article 1 (28 Nov 2026).
+  if (await resumeSavedBatch()) return;
   await runBatch(batchFileRows);
 });
 
@@ -1935,6 +2094,10 @@ batchTestsetBtn.addEventListener("click", async () => {
     });
     batchStatusEl.textContent = `Naqqash test set loaded: ${parsed.rows.length} rows, ${unique.length} unique by title. Running now.`;
     batchFileRows = unique;
+    updateBatchRunButton();
+    // A saved batch of this test set resumes instead of
+    // restarting from article 1 (28 Nov 2026).
+    if (await resumeSavedBatch()) return;
     await runBatch(unique);
   } catch (err) {
     batchStatusEl.textContent = `Could not load the built-in test set: ${err.message}`;
@@ -1963,27 +2126,55 @@ batchDownloadBtn.addEventListener("click", () => {
 // check) for rows still without a category or quartile. Answers
 // are stored until expiry, so the next batch for the same
 // journals is instant.
-// Returns { checked, found, saved, hecFound }.
+// Rows whose category is already stored are skipped before
+// this runs (their rank already carries wosCategory from
+// getRank, see shared.js) — so a repeat batch only fetches
+// the genuinely missing ones. The stored-first check also
+// lives inside fetchMjlCategory (worker), which returns
+// fromCache: true on a store hit.
+// Returns { checked, found, saved, hecFound, cached } —
+// cached counts rows whose category came from the stored WoS
+// list (no MJL fetch at all); fetched = found - cached.
 // onProgress, when given, is called after every checked row
-// with { checked, total, hecFound }, so the batch status can
+// with { checked, total, hecFound, cached }, so the batch status can
 // show the WoS pass progressing live in the same status area.
 async function fetchBatchWoSCategories(onProgress) {
-  let checked = 0, found = 0, saved = 0, hecFound = 0;
-  const totalToCheck = batchResults.filter((r) => r.issns && r.issns.length && !(r.rank && r.rank.wosCategory)).length;
-  if (typeof onProgress === "function") onProgress({ checked: 0, total: totalToCheck, hecFound: 0 });
-  for (let i = 0; i < batchResults.length; i++) {
-    const r = batchResults[i];
-    if (!r.issns || !r.issns.length || (r.rank && r.rank.wosCategory)) continue;
-    const res = await fetchMjlCategory(r.issns, r.journal);
+  let checked = 0, found = 0, saved = 0, hecFound = 0, cached = 0;
+  const rowsToCheck = batchResults.filter((r) => r.issns && r.issns.length && !(r.rank && r.rank.wosCategory));
+  const totalToCheck = rowsToCheck.length;
+  // Pass-only memo (28 Nov 2026): the list repeats journals
+  // (same ISSNs on several rows — Biotechnology Journal
+  // International four times in the Naqqash set, for one).
+  // A journal checked once in this pass is not re-checked for
+  // its other rows: the slow not-indexed wait especially must
+  // not be paid once per duplicate row. The memo lives only
+  // for this pass, so a later manual re-check still checks
+  // live. A "not indexed" answer IS stored now (30 days,
+  // tab-confirmed only — see background.js), so a repeat
+  // pass answers it from the store with no tab opened.
+  // The memo holds in-flight promises, so the three workers
+  // below share one check for a repeated ISSN set instead of
+  // racing to fetch it twice.
+  const passMemo = new Map();
+  if (typeof onProgress === "function") onProgress({ checked: 0, total: totalToCheck, hecFound: 0, cached: 0 });
+  async function checkOneRow(r) {
+    const memoKey = r.issns.join(",");
+    let memo = passMemo.get(memoKey);
+    if (!memo) { memo = {}; passMemo.set(memoKey, memo); }
+    if (memo.mjlPromise === undefined) memo.mjlPromise = fetchMjlCategory(r.issns, r.journal);
+    const res = await memo.mjlPromise;
     checked++;
     // A category OR a stable not-indexed is a definitive
     // answer: the row was checked. An error or timeout is not,
     // so the manual re-check button stays available for it.
     r.wosChecked = !!(res && (res.category || res.notIndexed));
-    if (typeof onProgress === "function") onProgress({ checked, total: totalToCheck, hecFound });
     if (res && res.category) {
       found++;
-      if (res.stored) saved++;
+      // stored is true for a store hit AND for a live fetch
+      // whose save succeeded — fromCache separates them, so
+      // "saved" only counts categories this pass actually
+      // fetched and stored.
+      if (res.fromCache) cached++; else if (res.stored) saved++;
       r.rank = r.rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
       r.rank.wosCategory = res.category;
       // A WoS category supersedes any earlier HEC fallback on
@@ -1997,7 +2188,9 @@ async function fetchBatchWoSCategories(onProgress) {
     } else if (!r.rank.wosCategory && (!r.rank || r.rank.source === "none")) {
       // HEC fallback: a DOAJ listing gives HEC Y. Only for rows
       // with no WoS category and no quartile — never an override.
-      const hec = await fetchHecCategory(r.issns, r.journal);
+      // Memoised per ISSN set like the MJL check above.
+      if (memo.hecPromise === undefined) memo.hecPromise = fetchHecCategory(r.issns, r.journal);
+      const hec = await memo.hecPromise;
       if (hec && hec.category) {
         hecFound++;
         r.rank = r.rank || { source: "none", quartile: "", jif: null, wosCategory: "" };
@@ -2014,13 +2207,26 @@ async function fetchBatchWoSCategories(onProgress) {
         && r.note.indexOf("Not ranked (not in WoS or Scopus)") === -1) {
       r.note = (r.note ? r.note + ". " : "") + "Not ranked (not in WoS or Scopus)";
     }
+    if (typeof onProgress === "function") onProgress({ checked, total: totalToCheck, hecFound, cached });
     await sleep(300); // polite pacing for the MJL search
   }
-  return { checked, found, saved, hecFound };
-}
-
-function wosPassText(wos) {
-  return `WoS categories: ${wos.found} found of ${wos.checked} checked${wos.found ? `, ${wos.saved} saved.` : "."}` + (wos.hecFound ? ` HEC Y: ${wos.hecFound} found (DOAJ).` : "");
+  // Three workers at a time (28 Nov 2026): the pass was fully
+  // sequential, so the handful of uncached not-indexed journals
+  // (each 25-60s: tab load, stability wait, second-ISSN tab,
+  // fresh-tab retry) set the whole pass time. Three at once
+  // cuts that to about a third; the MJL search is a public
+  // page load, and three background tabs are well within what
+  // Chrome handles. Each worker owns one row at a time — rows
+  // are never shared between workers.
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < rowsToCheck.length) {
+      const r = rowsToCheck[nextIndex++];
+      await checkOneRow(r);
+    }
+  }
+  await Promise.all([worker(), worker(), worker()]);
+  return { checked, found, saved, hecFound, cached };
 }
 
 // "Get WoS categories (free)": manual re-check for rows still
@@ -2033,7 +2239,7 @@ if (batchMjlBtn) {
     batchMjlBtn.disabled = true;
     try {
       const wos = await fetchBatchWoSCategories();
-      batchStatusEl.textContent = wosPassText(wos);
+      batchStatusEl.textContent = DATA.wosPassText(wos);
       updateBatchMjlButton();
       saveBatchLiveState(false);
     } finally {

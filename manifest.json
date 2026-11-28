@@ -53,6 +53,10 @@
   "manifest_version": 3,
   "name": "Journal Quartile Extension",
   "author": "Mobeen Nasir",
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
   "permissions": [
     "storage",
     "activeTab",
@@ -63,5 +67,5 @@
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  "version": "0.4.5"
+  "version": "0.4.6"
 }

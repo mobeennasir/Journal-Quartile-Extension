@@ -85,11 +85,11 @@ After any update, run `git pull` in the folder, then click **Reload** on the ext
 
 ## Status
 
-Version **0.4.5**, 28 November 2026. Tests pass: `node tests/run-tests.js` gives 499 passed, 0 failed (section 38 covers the per-year SJR fetch timer). UI uses the Flame Q brand palette (flame orange, dark burgundy). The free WoS and SJR data are fetched automatically; the WoS category is read from the rendered Master Journal List page in the browser, and the SJR download runs through one shared browser tab when the direct download is blocked. A batch interrupted by the panel closing or the browser restarting can be resumed from where it stopped, and every WoS category fetched is saved in the extension database. Journals with no WoS category and no quartile get an HEC fallback: HEC Y, checked automatically against DOAJ or from an imported HEC recognised-journals list, always labelled as a fallback and never as a quartile.
+Version **0.4.6**, 28 November 2026. Tests pass: `node tests/run-tests.js` gives 548 passed, 0 failed (section 39 covers the per-year SJR fetch timer and the WoS store-first fix; section 40 covers "Check this page" on any journal site and stored not-indexed WoS answers). UI uses the Flame Q brand palette (flame orange, dark burgundy). The free WoS and SJR data are fetched automatically; the WoS category is read from the rendered Master Journal List page in the browser, and the SJR download runs through one shared browser tab when the direct download is blocked. A batch interrupted by the panel closing or the browser restarting can be resumed from where it stopped, and every WoS category fetched is saved in the extension database. Journals with no WoS category and no quartile get an HEC fallback: HEC Y, checked automatically against DOAJ or from an imported HEC recognised-journals list, always labelled as a fallback and never as a quartile. "Check this page" works on any journal site: the first tap asks once for permission for that site, then it just works. A journal confirmed not in the WoS list is remembered for 30 days, so repeat checks answer at once.
 
 ## Files
 
-- `manifest.json` - Manifest V3, version 0.4.5. Author: Mobeen Nasir.
+- `manifest.json` - Manifest V3, version 0.4.6. Author: Mobeen Nasir.
 - `sidepanel.html`, `popup.css`, `popup.js` - the side panel UI and logic. Plain HTML and JavaScript, no dependencies, no build step, no remotely hosted code.
 - `shared.js` - the one copy of the DOI logic, shared by the page and the service worker. Also holds the full-tab helpers and the upload file-type guard.
 - `freedata.js` - the free data without JCR: Master Journal List search URLs and parsing, SJR download URLs and checks, latest SJR year.

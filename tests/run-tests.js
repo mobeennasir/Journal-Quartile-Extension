@@ -524,8 +524,8 @@ async function main() {
   check("background handles fetchMjlCategory and fetchSjrExport messages",
     bgJs.indexOf('message.type === "fetchMjlCategory"') !== -1
     && bgJs.indexOf('message.type === "fetchSjrExport"') !== -1);
-  check("manifest is 0.4.5 with MJL, SJR and DOAJ host permissions",
-    manifest.version === "0.4.5"
+  check("manifest is 0.4.6 with MJL, SJR and DOAJ host permissions",
+    manifest.version === "0.4.6"
     && manifest.host_permissions.indexOf("https://mjl.clarivate.com/*") !== -1
     && manifest.host_permissions.indexOf("https://www.scimagojr.com/*") !== -1
     && manifest.host_permissions.indexOf("https://scimagojr.com/*") !== -1
@@ -904,7 +904,7 @@ async function main() {
     && runBatchSrc.indexOf("sjrYearOutcomes.set(year, ensured)") !== -1
     && runBatchSrc.indexOf("updateBatchSjrStatus(sjrYearOutcomes)") !== -1);
   check("ensureSjrYear returns the fetched row count so the status can prove the download",
-    popupJs.indexOf('return timed({ state: "fetched", year: y, rows: res.rows })') !== -1);
+    popupJs.indexOf('return timed({ state: "fetched", year: y, rows: res.rows, timing: res.timing })') !== -1);
   // CSV is the only per-row view: every row and every column.
   const csvResults = [
     { title: "A", journal: "J1", year: "2021", issn: "0000-0001", doi: "10.1/a", rank: { source: "JCR", quartile: "Q2", jif: 5.07, wosCategory: "W" }, note: "" },
@@ -1136,9 +1136,8 @@ async function main() {
     popupJs.indexOf("Master Journal List (automatic)\", rows: rows.length, importedAt: new Date().toISOString(), expires: DATA.mjlExpiresAt(new Date().toISOString()) });") === -1
     || (popupJs.match(/putMjl\(/g) || []).length === 1);
   check("batch WoS summary counts how many were saved, not just found, plus the HEC count",
-    popupJs.indexOf("let checked = 0, found = 0, saved = 0, hecFound = 0;") !== -1
-    && popupJs.indexOf("WoS categories: ${wos.found} found of ${wos.checked} checked${wos.found ? `, ${wos.saved} saved.` : \".\"}`") !== -1
-    && popupJs.indexOf("HEC Y: ${wos.hecFound} found (DOAJ).") !== -1);
+    popupJs.indexOf("let checked = 0, found = 0, saved = 0, hecFound = 0, cached = 0;") !== -1
+    && DATA.wosPassText({ checked: 55, found: 40, saved: 40, hecFound: 1, cached: 0 }) === "WoS categories: 40 found of 55 checked, 40 saved. HEC Y: 1 found (DOAJ).");
   // Store behaviour (MemoryStore shares the IdbStore keying).
   const wosStore = new DATA.MemoryStore();
   const wosAt = new Date().toISOString();
@@ -1345,8 +1344,9 @@ async function main() {
   check("a finished batch clears the saved resume state",
     popupJs34.indexOf("// Finished: no resume state to keep.") !== -1
     && popupJs34.indexOf("clearBatchState();") !== -1);
-  check("a new file clears any saved batch state",
-    popupJs34.indexOf("// A new file replaces any saved batch: no stale resume offer.") !== -1);
+  check("a new file clears any saved batch state only when its rows differ (a matching file keeps the resume)",
+    popupJs34.indexOf("DATA.batchRowsMatch(previousSaved.rows, parsed.rows)") !== -1
+    && popupJs34.indexOf("Different file from the saved batch — starting fresh.") !== -1);
   const panel34 = fs.readFileSync(path.join(DIR, "..", "sidepanel.html"), "utf8");
   check("Stop and Resume buttons exist in the panel",
     panel34.indexOf('id="batch-stop"') !== -1 && panel34.indexOf('id="batch-resume"') !== -1);
@@ -1358,8 +1358,8 @@ async function main() {
   check("manifest name and author are the owner's, no internal Phase label",
     manifest34.name === "Journal Quartile Extension" && manifest34.author === "Mobeen Nasir"
     && manifest34.name.indexOf("Phase") === -1 && String(manifest34.action.default_title).indexOf("Phase") === -1);
-  check("manifest is MV3, version 0.4.5, host permissions scoped",
-    manifest34.manifest_version === 3 && manifest34.version === "0.4.5"
+  check("manifest is MV3, version 0.4.6, host permissions scoped",
+    manifest34.manifest_version === 3 && manifest34.version === "0.4.6"
     && manifest34.host_permissions.indexOf("<all_urls>") === -1
     && manifest34.host_permissions.every((h) => h.indexOf("*://*/*") === -1));
   const pngSize = (file) => {
@@ -1372,8 +1372,8 @@ async function main() {
   check("side panel open trigger uses openPanelOnActionClick",
     fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8").indexOf("openPanelOnActionClick: true") !== -1);
   const readme34 = fs.readFileSync(path.join(DIR, "..", "README.md"), "utf8");
-  check("README states version 0.4.5 and has no em or en dashes",
-    readme34.indexOf("0.4.5") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
+  check("README states version 0.4.6 and has no em or en dashes",
+    readme34.indexOf("0.4.6") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
   // Security: no code execution from data, no secrets, no trackers.
   const allJs34 = ["popup.js", "background.js", "jcr.js", "shared.js", "net.js", "freedata.js"]
     .map((f) => fs.readFileSync(path.join(DIR, "..", f), "utf8")).join("\n");
@@ -1505,7 +1505,7 @@ async function main() {
     && finishSeg.indexOf("await fetchBatchWoSCategories(") < finishSeg.indexOf("batchDownloadBtn.hidden = false;"));
   check("finished batch says what is still running while WoS fetches",
     popupJs35.indexOf('setBatchStatus(batchSummary + " Fetching WoS categories…");') !== -1
-    && popupJs35.indexOf("DATA.wosProgressText(p.checked, p.total, p.hecFound)") !== -1);
+    && popupJs35.indexOf("DATA.wosProgressText(p.checked, p.total, p.hecFound, p.cached)") !== -1);
   const stopSeg = popupJs35.slice(popupJs35.indexOf("if (stopped) {"), popupJs35.indexOf("// Finished: no resume state to keep."));
   check("stopped batch also runs the WoS pass before showing the download",
     stopSeg.indexOf("await fetchBatchWoSCategories(") !== -1
@@ -1642,9 +1642,9 @@ async function main() {
   check("background: MJL tab poll waits for a STABLE not-indexed reading",
     bgJs36.indexOf("mjlNotIndexedIsStable") !== -1
     && bgJs36.indexOf("consecutiveNotIndexed") !== -1);
-  check("background: a not-indexed MJL answer is retried once in a fresh tab",
-    bgJs36.indexOf("retried once in a fresh tab") !== -1
-    && bgJs36.indexOf("if (result && result.notIndexed) {") !== -1);
+  check("background: a not-indexed MJL answer is confirmed once in a tab only when the shell said so, never retried after a stable tab reading (28 Nov 2026)",
+    bgJs36.indexOf("result.notIndexed && !tabConfirmed") !== -1
+    && bgJs36.indexOf("if (result && result.notIndexed) {") === -1);
   check("background: only a successful MJL category is cached in memory (no poisoned negatives)",
     bgJs36.indexOf("if (cacheKey && result && result.category) mjlCategoryCache.set(cacheKey, result);") !== -1);
   check("background: DOAJ HEC check exists with store-first read and worker-side save",
@@ -1655,9 +1655,9 @@ async function main() {
   // Wiring in the panel (source checks, same pattern as section 35).
   const popupJs36 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
   check("panel: batch WoS pass also runs the HEC fallback and counts it",
-    popupJs36.indexOf("const hec = await fetchHecCategory(r.issns, r.journal);") !== -1
+    popupJs36.indexOf("memo.hecPromise = fetchHecCategory(r.issns, r.journal);") !== -1
     && popupJs36.indexOf("hecFound++") !== -1
-    && popupJs36.indexOf("HEC Y: ${wos.hecFound} found (DOAJ).") !== -1);
+    && DATA.wosPassText({ checked: 55, found: 40, saved: 40, hecFound: 1, cached: 0 }).indexOf("HEC Y: 1 found (DOAJ).") !== -1);
   check("panel: a found row with no ranking anywhere gets the 'not ranked' note",
     popupJs36.indexOf('Not ranked (not in WoS or Scopus)') !== -1);
   check("panel: single lookup chains the HEC check after the WoS check",
@@ -1673,8 +1673,8 @@ async function main() {
     panel36.indexOf('id="hec-file"') !== -1 && panel36.indexOf('id="hec-import"') !== -1
     && panel36.indexOf('id="hec-status"') !== -1 && panel36.indexOf("Import HEC data") !== -1);
   const manifest36 = JSON.parse(fs.readFileSync(path.join(DIR, "..", "manifest.json"), "utf8"));
-  check("manifest: doaj.org host permission added, version 0.4.5",
-    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.5");
+  check("manifest: doaj.org host permission added, version 0.4.6",
+    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.6");
 
   console.log("== 37. Batch fixes: SJR ultra-fast shared tab, first-tab leak, WoS progress, full-tab progress, WoS button, saved-status, 57/40 (28 Nov 2026) ==");
   // The user ran the v0.4.3 Naqqash batch (65 articles) and
@@ -1730,9 +1730,9 @@ async function main() {
   check("runBatch passes a live-progress callback into the WoS pass (finished and stopped paths)",
     popupJs37.indexOf("const wos = await fetchBatchWoSCategories((p) => {") !== -1
     && popupJs37.indexOf("const wosStopped = await fetchBatchWoSCategories((p) => {") !== -1
-    && popupJs37.indexOf('setBatchStatus(batchSummary + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound));') !== -1);
+    && popupJs37.indexOf('setBatchStatus(batchSummary + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound, p.cached));') !== -1);
   check("fetchBatchWoSCategories reports progress after every checked row",
-    popupJs37.indexOf('if (typeof onProgress === "function") onProgress({ checked, total: totalToCheck, hecFound });') !== -1);
+    popupJs37.indexOf('if (typeof onProgress === "function") onProgress({ checked, total: totalToCheck, hecFound, cached });') !== -1);
 
   // (5) WoS button after the batch: only rows that still need
   // a check keep it visible.
@@ -2142,7 +2142,254 @@ async function main() {
     && popupJs38.indexOf("return timed({ state: \"blocked\"") !== -1
     && popupJs38.indexOf("{ state: \"ready\", year: y, seconds: DATA.sjrElapsedSec(enteredAt, Date.now()) }") !== -1);
   check("single lookup status uses the timed outcome text",
-    popupJs38.indexOf("DATA.sjrOutcomeText(\"fetched\", data.year, ensured.rows, ensured.detail, ensured.seconds)") !== -1);
+    popupJs38.indexOf("DATA.sjrOutcomeText(\"fetched\", data.year, ensured.rows, ensured.detail, ensured.seconds, ensured.timing)") !== -1);
+
+  console.log("== 39. SJR timer display: phase split, in-progress tag, per-article time, TEMPORARY per-year list; WoS bar + button during pass; manual re-check note; WoS slowdown fixes; resume-aware Run button (28 Nov 2026) ==");
+  // Phase split in the tag: the worker's timing rides through
+  // ensureSjrYear into the outcome text.
+  check("sjrOutcomeText: fetched with tab timing shows the phase split",
+    DATA.sjrOutcomeText("fetched", 2017, 41551, "", 24, { tabMs: 2000, fetchMs: 19000, importMs: 3000 }) === "SJR 2017 saved, 41,551 rows, 24s (tab 2s, fetch 19s, import 3s)");
+  check("sjrOutcomeText: fetched with direct timing leaves out the 0s tab phase",
+    DATA.sjrOutcomeText("fetched", 2017, 41551, "", 22, { tabMs: 0, fetchMs: 19000, importMs: 3000 }) === "SJR 2017 saved, 41,551 rows, 22s (fetch 19s, import 3s)");
+  check("sjrOutcomeText: fetching state reads as an in-progress tag",
+    DATA.sjrOutcomeText("fetching", 2017) === "Getting SJR data for 2017…"
+    && DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetching", year: 2017 }]])) === "Getting SJR data for 2017…");
+  check("sjrLatestOutcomeText: latest year carries its timing split",
+    DATA.sjrLatestOutcomeText(new Map([[2017, { state: "fetched", year: 2017, rows: 41551, seconds: 24, timing: { tabMs: 2000, fetchMs: 19000, importMs: 3000 } }]])) === "SJR 2017 saved, 41,551 rows, 24s (tab 2s, fetch 19s, import 3s)");
+  // TEMPORARY per-year list: every year's line stays visible.
+  check("sjrYearListText: mixed outcomes, one line per year, sorted by year",
+    DATA.sjrYearListText(new Map([
+      [2026, { state: "not-released", year: 2026 }],
+      [2017, { state: "fetched", year: 2017, rows: 41551, seconds: 30, timing: { tabMs: 2000, fetchMs: 25000, importMs: 3000 } }],
+      [2019, { state: "ready", year: 2019, seconds: 0 }],
+    ])) === "2017: saved, 41,551 rows, 30s (tab 2s, fetch 25s, import 3s)\n2019: from cache, 0s\n2026: no data yet");
+  check("sjrYearListText: a not-released year keeps its line and never wipes earlier lines",
+    DATA.sjrYearListText(new Map([
+      [2017, { state: "fetched", year: 2017, rows: 41551, seconds: 30 }],
+      [2026, { state: "not-released", year: 2026 }],
+    ])).indexOf("2017: saved, 41,551 rows, 30s") !== -1
+    && DATA.sjrYearListText(new Map([
+      [2017, { state: "fetched", year: 2017, rows: 41551, seconds: 30 }],
+      [2026, { state: "not-released", year: 2026 }],
+    ])).indexOf("2026: no data yet") !== -1);
+  check("sjrYearListText: fetching and blocked lines, empty map gives empty text",
+    DATA.sjrYearListText(new Map([[2018, { state: "fetching", year: 2018 }]])) === "2018: getting data…"
+    && DATA.sjrYearListText(new Map([[2020, { state: "blocked", year: 2020, detail: "" }]])) === "2020: could not be downloaded"
+    && DATA.sjrYearListText(new Map()) === ""
+    && DATA.sjrYearListText(null) === "");
+  // Per-article time next to the counter.
+  check("batchArticleStatusText: previous row time shown, first row unchanged",
+    DATA.batchArticleStatusText(51, 65, "Short title here", 2) === "Checking article 51 of 65, last article 2s: Short title here…"
+    && DATA.batchArticleStatusText(1, 65, "Short title here", null) === "Checking article 1 of 65: Short title here…");
+  // Live state carries the list and the note to the full tab.
+  check("buildBatchLiveState carries the TEMPORARY per-year list and the MJL note",
+    DATA.buildBatchLiveState({ status: "x", sjrTag: "y", sjrYears: "2017: saved, 41,551 rows, 30s", mjlNote: "Manual re-check: 3 articles still need a WoS check" }).sjrYears === "2017: saved, 41,551 rows, 30s"
+    && DATA.buildBatchLiveState({ status: "x", sjrTag: "y", sjrYears: "2017: saved, 41,551 rows, 30s", mjlNote: "Manual re-check: 3 articles still need a WoS check" }).mjlNote === "Manual re-check: 3 articles still need a WoS check");
+  // Manual re-check note: says what it is and how many rows.
+  check("mjlRecheckNoteText: none, one, several",
+    DATA.mjlRecheckNoteText(0) === ""
+    && DATA.mjlRecheckNoteText(1) === "Manual re-check: 1 article still needs a WoS check"
+    && DATA.mjlRecheckNoteText(5) === "Manual re-check: 5 articles still need a WoS check");
+  // Wiring: timing flows, fetching state is set, rows are timed.
+  const popupJs39 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  const bgJs39 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
+  check("ensureSjrYear passes the worker timing into the outcome",
+    popupJs39.indexOf("timing: res.timing") !== -1);
+  check("direct SJR fetch returns per-phase timing",
+    bgJs39.indexOf("timing: { tabMs: 0, fetchMs, importMs") !== -1);
+  check("prefetch and row loop mark a year as fetching before awaiting it",
+    popupJs39.indexOf("sjrYearOutcomes.set(y, { state: \"fetching\", year: y })") !== -1
+    && popupJs39.indexOf("sjrYearOutcomes.set(year, { state: \"fetching\", year })") !== -1);
+  check("runBatch times each row and stops the clock before the polite pacing",
+    popupJs39.indexOf("const rowStartedAt = Date.now();") !== -1
+    && popupJs39.indexOf("lastArticleSeconds = DATA.sjrElapsedSec(rowStartedAt, Date.now());") !== -1);
+  check("per-year list renders under the tag and is cleared per run",
+    popupJs39.indexOf("batchSjrYearsEl.textContent = DATA.sjrYearListText(outcomes)") !== -1
+    && popupJs39.indexOf("if (batchSjrYearsEl) batchSjrYearsEl.textContent = \"\";") !== -1);
+  // WoS bar moves with the WoS pass; button stays hidden during it.
+  check("WoS onProgress moves the progress bar with checked/total",
+    popupJs39.indexOf("batchProgressBarEl.style.width = Math.round((p.checked / p.total) * 100) + \"%\";") !== -1);
+  check("WoS button is never unhidden before or during the automatic pass",
+    popupJs39.indexOf("batchMjlBtn.hidden = false") === -1);
+  // WoS slowdown fix A: a stored MJL category rides on the rank.
+  const store39 = new DATA.MemoryStore();
+  await store39.putSjr([{ issn: "1319-562X", journal: "Saudi Journal of Biological Sciences", year: 2022, quartile: "Q1", sjr: 1.234 }], { fileName: "sjr", rows: 1 });
+  await store39.putMjl([{ issn: "1319-562X", journal: "Saudi Journal of Biological Sciences", wosCategory: "W", wosIndex: "SCIE" }], { fileName: "mjl", rows: 1 });
+  const rank39 = await store39.getRank(["1319-562X"], 2022);
+  check("getRank: SJR row carries the stored WoS category instead of blank",
+    rank39 && rank39.source === "SJR" && rank39.quartile === "Q1" && rank39.wosCategory === "W");
+  const store39b = new DATA.MemoryStore();
+  await store39b.putJcr([{ issn: "0028-0836", journal: "Nature", year: 2015, quartile: "Q1", jif: 38.138, wosCategory: "" }], { fileName: "jcr", editionYear: 2015, rows: 1 });
+  await store39b.putMjl([{ issn: "0028-0836", journal: "Nature", wosCategory: "W", wosIndex: "SCIE" }], { fileName: "mjl", rows: 1 });
+  const rank39b = await store39b.getRank(["0028-0836"], 2015);
+  check("getRank: JCR row falls back to the stored WoS category when its own is blank",
+    rank39b && rank39b.source === "JCR" && rank39b.wosCategory === "W");
+  const store39c = new DATA.MemoryStore();
+  await store39c.putSjr([{ issn: "1319-562X", journal: "Saudi Journal of Biological Sciences", year: 2022, quartile: "Q1", sjr: 1.234 }], { fileName: "sjr", rows: 1 });
+  const rank39c = await store39c.getRank(["1319-562X"], 2022);
+  check("getRank: no stored MJL row means a blank WoS category, as before",
+    rank39c && rank39c.source === "SJR" && rank39c.wosCategory === "");
+  const store39d = new DATA.MemoryStore();
+  await store39d.putSjr([{ issn: "1319-562X", journal: "Saudi Journal of Biological Sciences", year: 2022, quartile: "Q1", sjr: 1.234 }], { fileName: "sjr", rows: 1 });
+  await store39d.putMjl([{ issn: "1319-562X", journal: "Saudi Journal of Biological Sciences", wosCategory: "W", wosIndex: "SCIE", expires: "2020-01-01T00:00:00.000Z" }], { fileName: "mjl", rows: 1 });
+  const rank39d = await store39d.getRank(["1319-562X"], 2022);
+  check("getRank: an expired stored MJL row does not count",
+    rank39d && rank39d.source === "SJR" && rank39d.wosCategory === "");
+  // WoS slowdown fix B: the pass memoises per ISSN set.
+  check("WoS pass memoises each distinct journal for the pass only",
+    popupJs39.indexOf("const passMemo = new Map();") !== -1
+    && popupJs39.indexOf("memo.mjlPromise = fetchMjlCategory(r.issns, r.journal);") !== -1
+    && popupJs39.indexOf("memo.hecPromise = fetchHecCategory(r.issns, r.journal);") !== -1);
+  // Resume-aware Run button: matching rows, fresh vs resume label.
+  check("batchRowsMatch: identical rows match, case and whitespace do not matter",
+    DATA.batchRowsMatch(
+      [{ title: "Alpha", journal: "J One", year: 2022, doi: "10.1/abc" }],
+      [{ title: " alpha ", journal: "j one", year: "2022", doi: "10.1/ABC" }])
+    && !DATA.batchRowsMatch(
+      [{ title: "Alpha", journal: "J One", year: 2022, doi: "10.1/abc" }],
+      [{ title: "Beta", journal: "J One", year: 2022, doi: "10.1/abc" }])
+    && !DATA.batchRowsMatch(
+      [{ title: "Alpha", journal: "J One", year: 2022, doi: "10.1/abc" }],
+      [{ title: "Alpha", journal: "J One", year: 2022, doi: "10.1/xyz" }])
+    && !DATA.batchRowsMatch(
+      [{ title: "Alpha", journal: "J One", year: 2022, doi: "10.1/abc" }],
+      [{ title: "Alpha", journal: "J One", year: 2022, doi: "10.1/abc" }, { title: "Beta", journal: "J Two", year: 2023, doi: "" }])
+    && !DATA.batchRowsMatch([], [])
+    && !DATA.batchRowsMatch(null, []));
+  check("run button label names the action: resume with the article number, else upload",
+    popupJs39.indexOf("Resume batch, from article ${args.startIndex + 1} of ${args.saved.rows.length}") !== -1
+    && popupJs39.indexOf("batchRunBtn.textContent = args") !== -1);
+  check("run button and test-set button resume a matching saved batch instead of restarting",
+    popupJs39.indexOf("if (await resumeSavedBatch()) return;") !== -1
+    && popupJs39.indexOf("async function resumeSavedBatch()") !== -1
+    && popupJs39.indexOf("DATA.batchRowsMatch(saved.rows, batchFileRows)") !== -1);
+  check("choosing a file keeps a matching saved batch and says a different file starts fresh",
+    popupJs39.indexOf("DATA.batchRowsMatch(previousSaved.rows, parsed.rows)") !== -1
+    && popupJs39.indexOf("Different file from the saved batch — starting fresh.") !== -1);
+
+  // (WoS store-first, 28 Nov 2026 15:08 PKT) The v0.4.5 batch
+  // re-fetched WoS one by one even though 43 journals were
+  // stored and valid: getRank dropped the stored category for
+  // SJR rows, so the pass filter could not see them as already
+  // stored, and the status showed no cache count — so the whole
+  // pass looked like slow re-fetching. The worker's per-row
+  // store check (getMjl, compact ISSN keys, real rows) was
+  // working; the pass just could not skip stored rows upfront.
+  check("wosPassText: cache count shown when stored rows are used, old shape kept when none",
+    DATA.wosPassText({ checked: 53, found: 45, saved: 2, hecFound: 1, cached: 43 }) === "WoS categories: 43 from cache, 2 fetched, 53 checked, 2 saved. HEC Y: 1 found (DOAJ)."
+    && DATA.wosPassText({ checked: 53, found: 43, saved: 0, hecFound: 1, cached: 43 }) === "WoS categories: 43 from cache, 0 fetched, 53 checked. HEC Y: 1 found (DOAJ)."
+    && DATA.wosPassText({ checked: 55, found: 40, saved: 40, hecFound: 1, cached: 0 }) === "WoS categories: 40 found of 55 checked, 40 saved. HEC Y: 1 found (DOAJ)."
+    && DATA.wosPassText({ checked: 55, found: 0, saved: 0, hecFound: 0, cached: 0 }) === "WoS categories: 0 found of 55 checked.");
+  check("wosProgressText: cache count appended when any row came from the store, old shape kept when none",
+    DATA.wosProgressText(22, 53, 1, 9) === "Fetching WoS categories... 22 of 53 checked, 9 from cache (HEC Y: 1 found)"
+    && DATA.wosProgressText(22, 53, 0, 0) === "Fetching WoS categories... 22 of 53 checked"
+    && DATA.wosProgressText(0, 55, 0) === "Fetching WoS categories... 0 of 55 checked");
+  check("stored-category rows need no WoS check, so a repeat batch performs zero MJL fetches for them and fetches only the missing ones",
+    (() => {
+      const rows = [];
+      for (let i = 0; i < 41; i++) rows.push({ issns: ["1319562X"], rank: { source: "SJR", quartile: "Q1", jif: null, wosCategory: "W" } });
+      for (let i = 0; i < 12; i++) rows.push({ issns: ["1234567" + i], rank: { source: "SJR", quartile: "Q2", jif: null, wosCategory: "" } });
+      return DATA.batchRowsNeedingWosCheck(rows) === 12;
+    })()
+    && popupJs39.indexOf("const rowsToCheck = batchResults.filter((r) => r.issns && r.issns.length && !(r.rank && r.rank.wosCategory));") !== -1);
+  check("worker marks a stored WoS answer so the panel can count cache hits separately from live fetches",
+    bgJs39.indexOf("fromCache: true") !== -1
+    && bgJs39.indexOf("stored: true, fromCache: true") !== -1);
+  check("WoS pass counts store hits as cached and only live saves as saved, and returns the cache count",
+    popupJs39.indexOf("if (res.fromCache) cached++; else if (res.stored) saved++;") !== -1
+    && popupJs39.indexOf("return { checked, found, saved, hecFound, cached };") !== -1);
+  check("WoS pass runs three workers at once, sharing one check per ISSN set through promise memo",
+    popupJs39.indexOf("await Promise.all([worker(), worker(), worker()]);") !== -1
+    && popupJs39.indexOf("memo.mjlPromise = fetchMjlCategory(r.issns, r.journal);") !== -1
+    && popupJs39.indexOf("memo.hecPromise = fetchHecCategory(r.issns, r.journal);") !== -1);
+
+  console.log("== 40. Check this page: runtime host permission for any journal site; stored MJL not-indexed answers, 30 days (28 Nov 2026) ==");
+  // "Check this page" on a site the manifest does not
+  // cover (njns.nust.edu.pk, 28 Nov 2026): Chrome refuses
+  // the read until that origin is granted once. The worker
+  // classifies the refusal and the panel asks from the tap,
+  // then retries. No per-publisher list: any journal site
+  // works after one grant.
+  check("isHostPermissionError: Chrome's host-permission refusal, and nothing else",
+    DATA.isHostPermissionError('Cannot access contents of url "https://njns.nust.edu.pk/index.php/njns/article/view/136". Extension manifest must request permission to access this host.')
+    && DATA.isHostPermissionError("Cannot access contents of url")
+    && DATA.isHostPermissionError("Extension manifest must request permission to access this host")
+    && !DATA.isHostPermissionError("")
+    && !DATA.isHostPermissionError("Network error")
+    && !DATA.isHostPermissionError("chrome.scripting is unavailable in this browser.")
+    && !DATA.isHostPermissionError(null));
+  check("mjlNotIndexedExpiresAt: 30 days after import",
+    new Date(DATA.mjlNotIndexedExpiresAt("2026-11-28T00:00:00.000Z")).getTime() - new Date("2026-11-28T00:00:00.000Z").getTime() === 30 * 24 * 60 * 60 * 1000);
+  const manifest40 = JSON.parse(fs.readFileSync(path.join(DIR, "..", "manifest.json"), "utf8"));
+  check("manifest: optional host permissions for any journal site, host permissions still scoped",
+    Array.isArray(manifest40.optional_host_permissions)
+    && manifest40.optional_host_permissions.indexOf("https://*/*") !== -1
+    && manifest40.optional_host_permissions.indexOf("http://*/*") !== -1
+    && manifest40.optional_host_permissions.indexOf("<all_urls>") === -1
+    && manifest40.host_permissions.indexOf("<all_urls>") === -1
+    && manifest40.host_permissions.every((h) => h.indexOf("*://*/*") === -1));
+  const bgJs40 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
+  const popupJs40 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+  check("worker answers needs-permission with the origin, classified by the pure helper",
+    bgJs40.indexOf('error: "needs-permission", host, origin') !== -1
+    && bgJs40.indexOf("FDATA.isHostPermissionError(detail)") !== -1);
+  check("permission is requested from the panel tap, never from the worker",
+    bgJs40.indexOf("chrome.permissions.request(") === -1
+    && popupJs40.indexOf('chrome.permissions.request({ origins: [origin + "/*"] })') !== -1
+    && popupJs40.indexOf('response.error === "needs-permission"') !== -1
+    && popupJs40.indexOf("function sendCheckPageMessage()") !== -1);
+  check("panel retries once on grant, and names the paste fallback on decline",
+    popupJs40.indexOf("const granted = await requestHostPermission(response.origin);") !== -1
+    && popupJs40.indexOf("needs permission for ${response.host || \"this site\"}. Copy the DOI from the article page and paste it above.") !== -1);
+  // Stored not-indexed answers: NUST Journal of Natural
+  // Sciences (2710-222X / 2072-4659) opened the MJL tab
+  // again and again on every lookup, because negatives
+  // were never stored. Now a tab-confirmed negative is
+  // stored for 30 days and answers from the store.
+  const store40 = new DATA.MemoryStore();
+  await store40.putMjl([{ issn: "2710-222X", journal: "NUST Journal of Natural Sciences", wosCategory: "", wosIndex: "", notIndexed: true, importedAt: new Date().toISOString(), expires: DATA.mjlNotIndexedExpiresAt(new Date().toISOString()) }], { fileName: "Master Journal List (automatic)", rows: 1 });
+  await store40.putMjl([{ issn: "2072-4659", journal: "NUST Journal of Natural Sciences", wosCategory: "", wosIndex: "", notIndexed: true, importedAt: new Date().toISOString(), expires: DATA.mjlNotIndexedExpiresAt(new Date().toISOString()) }], { fileName: "Master Journal List (automatic)", rows: 1 });
+  await store40.putMjl([{ issn: "1319-562X", journal: "Saudi Journal of Biological Sciences", wosCategory: "W", wosIndex: "SCIE" }], { fileName: "Master Journal List (automatic)", rows: 1 });
+  const neg40 = await store40.getMjl(["2710-222X"]);
+  check("getMjl: a stored not-indexed answer returns the marker, never a category",
+    neg40 && neg40.notIndexed === true && neg40.category === "");
+  const neg40b = await store40.getMjl(["2072-4659", "2710-222X"]);
+  check("getMjl: either ISSN of a stored negative answers",
+    neg40b && neg40b.notIndexed === true && neg40b.category === "");
+  const cat40 = await store40.getMjl(["1319-562X"]);
+  check("getMjl: a stored category still answers as before",
+    cat40 && cat40.category === "W" && !cat40.notIndexed);
+  const store40b = new DATA.MemoryStore();
+  await store40b.putMjl([{ issn: "2710-222X", journal: "NUST Journal of Natural Sciences", wosCategory: "", notIndexed: true, expires: DATA.mjlNotIndexedExpiresAt(new Date().toISOString()) }], { fileName: "mjl", rows: 1 });
+  await store40b.putMjl([{ issn: "2076-2607", journal: "Microorganisms", wosCategory: "W", wosIndex: "SCIE" }], { fileName: "mjl", rows: 1 });
+  const win40 = await store40b.getMjl(["2710-222X", "2076-2607"]);
+  check("getMjl: a category on any ISSN wins over a negative on another",
+    win40 && win40.category === "W" && !win40.notIndexed);
+  const store40c = new DATA.MemoryStore();
+  await store40c.putMjl([{ issn: "2710-222X", journal: "NUST Journal of Natural Sciences", wosCategory: "", notIndexed: true, expires: "2020-01-01T00:00:00.000Z" }], { fileName: "mjl", rows: 1 });
+  check("getMjl: an expired not-indexed answer does not count",
+    (await store40c.getMjl(["2710-222X"])) === null);
+  const meta40 = await store40.getMeta();
+  check("getMeta: mjlRows counts categorised rows only, not stored negatives",
+    meta40.mjlRows === 1);
+  check("mjlStatusText: stored negatives do not move the journals-stored count",
+    DATA.mjlStatusText(meta40).indexOf("1 journals stored automatically") !== -1);
+  await store40.putSjr([{ issn: "2710-222X", journal: "NUST Journal of Natural Sciences", year: 2024, quartile: "Q2", sjr: 0.5 }], { fileName: "sjr", rows: 1 });
+  const rank40 = await store40.getRank(["2710-222X"], 2024);
+  check("getRank: a stored negative keeps WoS blank on the rank, never a fake category",
+    rank40 && rank40.source === "SJR" && rank40.quartile === "Q2" && rank40.wosCategory === "");
+  check("no fresh-tab retry once a tab rendered a stable not-indexed result",
+    bgJs40.indexOf("result.notIndexed && !tabConfirmed") !== -1
+    && bgJs40.indexOf("A \"not indexed\" answer is retried once in a fresh tab") === -1
+    && bgJs40.indexOf("one tab is enough") !== -1);
+  check("tab-confirmed negatives are saved for 30 days, never on errors or challenges",
+    bgJs40.indexOf("async function saveMjlNotIndexed(issns, journal)") !== -1
+    && bgJs40.indexOf("FDATA.mjlNotIndexedExpiresAt(importedAt)") !== -1
+    && bgJs40.indexOf("if (result && result.notIndexed && tabConfirmed)") !== -1
+    && bgJs40.indexOf("await saveMjlNotIndexed(list, journal);") !== -1);
+  check("store-first answers a stored negative with no tab opened",
+    bgJs40.indexOf("if (stored.notIndexed) hit.notIndexed = true;") !== -1
+    && bgJs40.indexOf("if (cacheKey && stored.category) mjlCategoryCache.set(cacheKey, hit);") !== -1);
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));
