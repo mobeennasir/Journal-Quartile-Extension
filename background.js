@@ -383,7 +383,7 @@ async function waitForTabLoad(tabId, timeoutMs) {
   } catch (err) { /* fall through to the listener */ }
   return new Promise((resolve) => {
     let done = false;
-    const timer = setTimeout(() => { if (!done) { done = true; resolve(false); } }, timeoutMs || 30000);
+    const timer = setTimeout(() => { if (!done) { done = true; chrome.tabs.onUpdated.removeListener(listener); resolve(false); } }, timeoutMs || 30000);
     const listener = (id, info) => {
       if (id === tabId && info.status === "complete" && !done) {
         done = true;
@@ -408,11 +408,13 @@ async function fetchMjlCategoryViaTab(issns) {
   const list = (issns || []).filter(Boolean);
   let sawUnreadable = false;
   let sawBlocked = false;
+  let sawNotIndexed = false;
   for (const issn of list) {
     let tabId = null;
     try {
       const tab = await chrome.tabs.create({ url: FREE.mjlSearchUrl(issn), active: false });
       tabId = tab.id;
+      await registerExtensionTab(tabId, "mjl");
       const loaded = await waitForTabLoad(tabId, 30000);
       if (!loaded) { sawUnreadable = true; continue; }
       // The Angular app renders after load: poll the rendered
@@ -446,18 +448,25 @@ async function fetchMjlCategoryViaTab(issns) {
       if (parsed.found === "result" && parsed.category) {
         return { category: parsed.category, index: parsed.index, issn };
       }
+      // A stable not-indexed for THIS ISSN is not an answer
+      // for the journal: try the next ISSN before concluding.
+      // The old code returned here, so for a dual-ISSN journal
+      // (Biology and Fertility of Soils: print 0178-2762,
+      // online 1432-0789) a miss on the print ISSN meant the
+      // online ISSN was never tried — one of the 3 SCIE misses
+      // in the user's batch (38 of 55 WoS found, then 40).
       if (parsed.found === "not-indexed" && FREE.mjlNotIndexedIsStable(consecutiveNotIndexed, Date.now() - startedAt)) {
-        return { category: "", index: "", issn, notIndexed: true };
+        sawNotIndexed = true;
+        continue;
       }
       sawUnreadable = true;
     } catch (err) {
       sawUnreadable = true;
     } finally {
-      if (tabId !== null && chrome.tabs && chrome.tabs.remove) {
-        try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ }
-      }
+      await closeExtensionTab(tabId);
     }
   }
+  if (sawNotIndexed) return { category: "", index: "", issn: list[list.length - 1], notIndexed: true };
   return { error: sawBlocked ? "blocked" : (sawUnreadable ? "unreadable" : "network") };
 }
 
@@ -494,8 +503,11 @@ async function fetchMjlCategory(issns, journal) {
       break;
     }
     if (parsed.found === "not-indexed") {
+      // Same rule as the tab path: a miss on one ISSN must not
+      // stop the next ISSN being tried. Keep the answer as a
+      // fallback in case no later ISSN says anything better.
       result = { category: "", index: "", issn, notIndexed: true };
-      break;
+      continue;
     }
     sawUnreadable = true;
   }
@@ -662,8 +674,9 @@ async function saveHecCategory(result, issns, journal) {
 // executeScript), and MV3 guidance says to keep executeScript
 // results small and to stream many-megabyte payloads in chunks
 // instead. So the CSV is now fetched in the tab, stored on the
-// tab's window, and read back in 512 KB slices — every
-// executeScript result stays small. A single-return fetch is
+// tab's window (under a per-year key, so parallel fetches for
+// other years cannot clobber it), and read back in 4 MB slices —
+// every executeScript result stays small. A single-return fetch is
 // kept as a fallback for a tab whose window did not keep the
 // text between calls.
 //
@@ -753,7 +766,11 @@ async function sjrInTabFetch(urls, year, mode, budgetMs) {
         continue;
       }
       if (mode === "store") {
-        window.__sjrCsv = text;
+        // Per-year key: the batch now fetches several years in
+        // parallel from ONE shared tab, and a single
+        // window.__sjrCsv would be overwritten by the next
+        // year's fetch before the first was read back.
+        window["__sjrCsv_" + year] = text;
         return { ok: true, length: text.length, year: headerYear || year, tried };
       }
       return { ok: true, text, tried };
@@ -785,18 +802,20 @@ async function fetchSjrCsvInTab(tabId, year) {
     const summary = sjrTriedSummary(stored && stored.tried);
     return { error: "blocked", detail: summary ? "no candidate returned the CSV: " + summary : "in-tab fetch failed" };
   }
-  // Read the stored text back in small slices: each
-  // executeScript result is at most 512 KB, never the whole
-  // ~11 MB file in one result.
-  const CHUNK = 512 * 1024;
+  // Read the stored text back in slices: each executeScript
+  // result is at most 4 MB (up from 512 KB: an ~11 MB file
+  // needed ~22 round trips, now 3), never the whole file in
+  // one result. The read uses the per-year window key, so
+  // parallel fetches for other years cannot clobber it.
+  const CHUNK = 4 * 1024 * 1024;
   let text = "";
   for (let start = 0; start < stored.length; start += CHUNK) {
     let slice = "";
     try {
       const r = await chrome.scripting.executeScript({
         target: { tabId },
-        func: (s, l) => (window.__sjrCsv || "").slice(s, s + l),
-        args: [start, CHUNK],
+        func: (s, l, y) => ((window["__sjrCsv_" + y]) || "").slice(s, s + l),
+        args: [start, CHUNK, year],
       });
       slice = r && r[0] ? String(r[0].result || "") : "";
     } catch (err) { slice = ""; }
@@ -875,6 +894,19 @@ async function fetchSjrCsvInTabSingle(tabId, year) {
 // The outcome is also written to chrome.storage.local, so a
 // popup that timed out anyway can recover it by re-checking
 // the store (see ensureSjrYear in popup.js).
+//
+// SHARED TAB (28 Nov 2026): fetchSjrViaTab no longer opens a
+// fresh tab per year. ONE tab is shared for every year in the
+// batch (getSjrSharedTab): when clearance is fresh it opens on
+// the light SJR home page — no ranking page has to load at all
+// — and it is reused warm for the next year with only a 2s
+// re-poll. The tab is closed by the sweep at batch end or
+// worker startup, never per fetch. Every tab the extension
+// opens is registered in chrome.storage.local (see
+// registerExtensionTab / sweepExtensionTabs), so a tab left
+// over when the worker is terminated mid-fetch — the first-tab
+// leak — is closed on the next worker start instead of staying
+// open forever.
 
 // Cloudflare clearance earned by a real tab, remembered with a
 // timestamp. Best-effort storage: missing chrome or a storage
@@ -917,62 +949,240 @@ async function pollSjrTabForClearance(tabId, budgetMs) {
   }
 }
 
-// Fetch the CSV from an already-cleared tab and import it.
-// Returns the fetchSjrViaTab outcome shape.
-async function finishSjrTabFetch(tabId, year) {
-  const fetched = await fetchSjrCsvInTab(tabId, year);
-  if (fetched.error) return { error: fetched.error, year, detail: fetched.detail || "" };
-  const done = await importSjrText(fetched.text, year);
-  if (!done.rows) {
-    return { error: "not-csv", year, detail: done.wrongYear
-      ? "wrong-year: SJR returned the " + done.wrongYear + " file for a " + year + " request"
-      : "downloaded text parsed to 0 rows (" + done.skipped + " skipped)" };
-  }
-  return { rows: done.rows, skipped: done.skipped, year, via: "browser-tab" };
+// ---- Extension tab registry + shared SJR tab (28 Nov 2026) ----
+// FIRST-TAB LEAK, root cause: the tab id lived only in the
+// service worker's memory, and the worker can be terminated
+// mid-fetch — the first fetch is the longest, so it is the one
+// that outlives the worker's keep-alive. When that happens the
+// finally that closes the tab never runs, and nothing anywhere
+// remembers the tab exists, so it stays open forever. The fix
+// is a persistent registry in chrome.storage.local: every tab
+// the extension opens is registered at creation and unregistered
+// on close, and a sweep closes any registered tab left over
+// (worker startup, batch end, or before a new tab is created).
+const EXTENSION_TABS_KEY = "extensionTabs";
+
+function extensionTabsGet() {
+  try {
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return Promise.resolve([]);
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(EXTENSION_TABS_KEY, (v) => {
+          const list = (v && v[EXTENSION_TABS_KEY]) || [];
+          resolve(Array.isArray(list) ? list : []);
+        });
+      } catch (err) { resolve([]); }
+    });
+  } catch (err) { return Promise.resolve([]); }
 }
 
-async function fetchSjrViaTab(year) {
-  let tabId = null;
-  let outcome = null;
+function extensionTabsSet(list) {
   try {
-    // Background first, always. With clearance on record the
-    // poll is short (the page reads clean at once); without it
-    // the background gets longer, so a managed challenge that
-    // auto-clears on its own never forces a visible tab.
+    if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return Promise.resolve();
+    return new Promise((resolve) => {
+      const save = {};
+      save[EXTENSION_TABS_KEY] = list;
+      try { chrome.storage.local.set(save, () => resolve()); } catch (err) { resolve(); }
+    });
+  } catch (err) { return Promise.resolve(); }
+}
+
+async function registerExtensionTab(tabId, purpose) {
+  if (tabId === null || tabId === undefined) return;
+  const list = await extensionTabsGet();
+  if (!list.some((t) => t.tabId === tabId)) {
+    list.push({ tabId, purpose: purpose || "", openedAt: new Date().toISOString() });
+    await extensionTabsSet(list);
+  }
+}
+
+async function unregisterExtensionTab(tabId) {
+  if (tabId === null || tabId === undefined) return;
+  const list = await extensionTabsGet();
+  const kept = list.filter((t) => t.tabId !== tabId);
+  if (kept.length !== list.length) await extensionTabsSet(kept);
+}
+
+// Close every registered tab except keepTabId. Only tabs still
+// on an SJR or MJL page are closed: if the user navigated the
+// tab somewhere else, it is theirs, leave it. Best-effort: a
+// dead id is dropped from the registry.
+async function sweepExtensionTabs(keepTabId) {
+  const list = await extensionTabsGet();
+  const kept = [];
+  for (const entry of list) {
+    if (entry.tabId === keepTabId) { kept.push(entry); continue; }
+    let drop = false;
+    try {
+      const tab = await chrome.tabs.get(entry.tabId);
+      const url = (tab && tab.url) || "";
+      if (url.indexOf("https://www.scimagojr.com/") === 0 || url.indexOf("https://mjl.clarivate.com/") === 0) {
+        try { await chrome.tabs.remove(entry.tabId); } catch (e) { /* already closed */ }
+        drop = true;
+      }
+    } catch (err) {
+      drop = true; // tab already gone: drop the dead id
+    }
+    if (!drop) kept.push(entry);
+  }
+  await extensionTabsSet(kept);
+  return kept.length;
+}
+
+// Close a tab AND drop it from the registry. The one place tabs
+// are closed, so a close can never forget the registry.
+async function closeExtensionTab(tabId) {
+  if (tabId === null || tabId === undefined) return;
+  try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ }
+  await unregisterExtensionTab(tabId);
+}
+
+// ONE shared SJR tab for every year's CSV fetch (28 Nov 2026).
+// The old path opened a fresh tab per year: tab create + a full
+// ranking-page load (a ~32k-row table) + a clearance poll, once
+// per year, and the first 2-3 fetches paid the full cost every
+// time while later ones were only a few seconds faster. The
+// shared tab is created once per batch (or per worker life),
+// kept on scimagojr.com, and every year's CSV is fetched from
+// it in page context. When clearance is fresh the tab opens on
+// the light home page — no ranking page has to load at all —
+// and no clearance re-poll happens; the challenged ranking page
+// is only opened when clearance must still be earned. The tab
+// is closed by the sweep at batch end (or worker startup), so
+// it can never leak like the first tab did.
+let sjrSharedTabId = null;
+let sjrSharedTabCreating = null;
+
+async function getSjrSharedTab(year) {
+  const startedAt = Date.now();
+  // Reuse the in-memory tab if it is still alive and on SJR.
+  // A 2s re-poll proves it still reads clean: a tab that has
+  // been re-challenged is closed and recreated instead of
+  // being trusted.
+  if (sjrSharedTabId !== null) {
+    try {
+      const tab = await chrome.tabs.get(sjrSharedTabId);
+      if (tab && tab.url && tab.url.indexOf("https://www.scimagojr.com/") === 0) {
+        const state = await pollSjrTabForClearance(sjrSharedTabId, 2000);
+        if (state === "cleared" || state === "timeout") {
+          return { tabId: sjrSharedTabId, warm: true, tabMs: Date.now() - startedAt };
+        }
+        await closeExtensionTab(sjrSharedTabId);
+      }
+    } catch (err) { /* dead: fall through and recreate */ }
+    sjrSharedTabId = null;
+  }
+  // The worker may have restarted since the tab was opened:
+  // the registry remembers it, so it can still be reused.
+  const registered = await extensionTabsGet();
+  const sjrEntries = registered.filter((t) => t.purpose === "sjr").sort((a, b) => String(b.openedAt).localeCompare(String(a.openedAt)));
+  if (sjrEntries.length) {
+    try {
+      const tab = await chrome.tabs.get(sjrEntries[0].tabId);
+      if (tab && tab.url && tab.url.indexOf("https://www.scimagojr.com/") === 0) {
+        const state = await pollSjrTabForClearance(sjrEntries[0].tabId, 2000);
+        if (state === "cleared" || state === "timeout") {
+          sjrSharedTabId = sjrEntries[0].tabId;
+          return { tabId: sjrEntries[0].tabId, warm: true, tabMs: Date.now() - startedAt };
+        }
+        await closeExtensionTab(sjrEntries[0].tabId);
+      }
+    } catch (err) { /* dead: fall through */ }
+  }
+  // No usable tab: create one. Concurrent callers share the
+  // one creation (the batch prefetches up to 3 years at once):
+  // without this guard two callers could both see "no tab"
+  // and open two.
+  if (sjrSharedTabCreating) {
+    const shared = await sjrSharedTabCreating;
+    return { tabId: shared.tabId, warm: shared.warm, error: shared.error, detail: shared.detail, tabMs: Date.now() - startedAt };
+  }
+  sjrSharedTabCreating = (async () => {
+    // Clearance fresh -> light home page, no ranking page
+    // load, no clearance re-poll. No clearance -> the
+    // challenged ranking page, which earns it.
     const clearance = await getSjrClearance();
-    const bgBudgetMs = FREE.sjrClearanceIsFresh(clearance && clearance.clearedAt) ? 10000 : 30000;
-    tabId = (await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })).id;
-    await waitForTabLoad(tabId, 20000);
-    let state = await pollSjrTabForClearance(tabId, bgBudgetMs);
+    const fresh = FREE.sjrClearanceIsFresh(clearance && clearance.clearedAt);
+    const url = fresh ? FREE.sjrHomeUrl() : FREE.sjrRankPageUrl(year);
+    const tab = await chrome.tabs.create({ url, active: false });
+    sjrSharedTabId = tab.id;
+    await registerExtensionTab(tab.id, "sjr");
+    await waitForTabLoad(tab.id, 20000);
+    const budgetMs = fresh ? 10000 : 30000;
+    let state = await pollSjrTabForClearance(tab.id, budgetMs);
     if (state === "cleared") {
       await setSjrClearance();
-      outcome = await finishSjrTabFetch(tabId, year);
-      return outcome;
+      return { tabId: tab.id, warm: false };
     }
     // The background tab hit a challenge (or never resolved):
-    // close it and force ONE visible tab for this year so the
-    // human can clear the check. This is the only case a
-    // visible tab opens.
-    if (tabId !== null) { try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ } tabId = null; }
-    tabId = (await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })).id;
-    await waitForTabLoad(tabId, 20000);
-    state = await pollSjrTabForClearance(tabId, 60000);
+    // close it and force ONE visible tab so the human can clear
+    // the check. The visible tab becomes the shared tab, so
+    // later years reuse it instead of opening another.
+    await closeExtensionTab(tab.id);
+    sjrSharedTabId = null;
+    const visible = await chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true });
+    sjrSharedTabId = visible.id;
+    await registerExtensionTab(visible.id, "sjr");
+    await waitForTabLoad(visible.id, 20000);
+    state = await pollSjrTabForClearance(visible.id, 60000);
     if (state === "cleared") {
       await setSjrClearance();
-      outcome = await finishSjrTabFetch(tabId, year);
+      return { tabId: visible.id, warm: false };
+    }
+    await closeExtensionTab(visible.id);
+    sjrSharedTabId = null;
+    if (state === "challenge") return { error: "challenge", year };
+    return { error: "blocked", year, detail: "SJR page did not finish loading in the visible tab" };
+  })();
+  try {
+    const created = await sjrSharedTabCreating;
+    if (created.error) return { error: created.error, year, detail: created.detail || "", tabMs: Date.now() - startedAt };
+    return { tabId: created.tabId, warm: created.warm, tabMs: Date.now() - startedAt };
+  } finally {
+    sjrSharedTabCreating = null;
+  }
+}
+
+// Fetch the CSV for one year from the shared SJR tab and import
+// it. The tab is NOT closed here: it is reused for the next
+// year, and closed by the sweep at batch end or worker startup.
+// The outcome carries per-phase timings (tab / fetch / import)
+// so a slow batch can say which phase was slow.
+async function fetchSjrViaTab(year) {
+  const startedAt = Date.now();
+  let outcome = null;
+  try {
+    const shared = await getSjrSharedTab(year);
+    const tabMs = shared.tabMs || 0;
+    if (shared.error) {
+      outcome = { error: shared.error, year, detail: shared.detail || "", timing: { tabMs, fetchMs: 0, importMs: 0, totalMs: Date.now() - startedAt } };
       return outcome;
     }
-    if (state === "challenge") { outcome = { error: "challenge", year }; return outcome; }
-    outcome = { error: "blocked", year, detail: "SJR page did not finish loading in the visible tab" };
+    const fetchStartedAt = Date.now();
+    const fetched = await fetchSjrCsvInTab(shared.tabId, year);
+    const fetchMs = Date.now() - fetchStartedAt;
+    if (fetched.error) {
+      outcome = { error: fetched.error, year, detail: fetched.detail || "", timing: { tabMs, fetchMs, importMs: 0, totalMs: Date.now() - startedAt } };
+      return outcome;
+    }
+    const importStartedAt = Date.now();
+    const done = await importSjrText(fetched.text, year);
+    const importMs = Date.now() - importStartedAt;
+    if (!done.rows) {
+      outcome = { error: "not-csv", year,
+        detail: done.wrongYear
+          ? "wrong-year: SJR returned the " + done.wrongYear + " file for a " + year + " request"
+          : "downloaded text parsed to 0 rows (" + done.skipped + " skipped)",
+        timing: { tabMs, fetchMs, importMs, totalMs: Date.now() - startedAt } };
+      return outcome;
+    }
+    outcome = { rows: done.rows, skipped: done.skipped, year, via: "browser-tab", timing: { tabMs, fetchMs, importMs, totalMs: Date.now() - startedAt } };
     return outcome;
   } catch (err) {
-    outcome = { error: "failed", year, detail: String(err && err.message || err) };
+    outcome = { error: "failed", year, detail: String(err && err.message || err), timing: { tabMs: 0, fetchMs: 0, importMs: 0, totalMs: Date.now() - startedAt } };
     return outcome;
   } finally {
     if (outcome) recordSjrTabFetch(outcome);
-    if (tabId !== null && chrome.tabs && chrome.tabs.remove) {
-      try { await chrome.tabs.remove(tabId); } catch (e) { /* already closed */ }
-    }
   }
 }
 
@@ -984,7 +1194,7 @@ function recordSjrTabFetch(outcome) {
     if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local || !outcome || !outcome.year) return;
     const key = "sjrTabFetch:" + outcome.year;
     const save = {};
-    save[key] = { state: outcome.rows ? "fetched" : outcome.error, rows: outcome.rows || 0, at: new Date().toISOString(), detail: outcome.detail || "" };
+    save[key] = { state: outcome.rows ? "fetched" : outcome.error, rows: outcome.rows || 0, at: new Date().toISOString(), detail: outcome.detail || "", timing: outcome.timing || null };
     chrome.storage.local.set(save, () => {});
   } catch (err) { /* storage is best-effort here */ }
 }
@@ -1181,6 +1391,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .catch((err) => sendResponse({ error: "failed", detail: String(err && err.message || err) }));
     return true;
   }
+  // Is the SJR clearance fresh? The panel skips the direct
+  // worker fetch (which 403s fast when the Lax clearance
+  // cookie is not sent cross-origin) and goes straight to the
+  // shared tab when it is.
+  if (message && message.type === "sjrClearanceFresh") {
+    getSjrClearance()
+      .then((c) => sendResponse({ fresh: FREE.sjrClearanceIsFresh(c && c.clearedAt) }))
+      .catch(() => sendResponse({ fresh: false }));
+    return true;
+  }
+  // Close any leftover SJR/MJL tab the extension opened (the
+  // first-tab leak safety net). The panel sends this at batch
+  // end, after the WoS pass has finished.
+  if (message && message.type === "sweepTabs") {
+    sweepExtensionTabs(message.keepTabId !== undefined ? message.keepTabId : null)
+      .then((remaining) => sendResponse({ remaining }))
+      .catch(() => sendResponse({ remaining: -1 }));
+    return true;
+  }
   if (message && message.type === "autoFetchFreeData") {
     autoFetchFreeData()
       .then((status) => sendResponse({ status }))
@@ -1235,4 +1464,9 @@ if (chrome.action && chrome.action.onClicked) {
 // Free data: check on every worker wake whether the yearly
 // auto-fetch is due (cheap: one storage read, then it stops).
 maybeAutoFetch();
+
+// First-tab leak safety net: a worker that restarts has no
+// fetch in flight, so any registered tab left over is a
+// leftover — close it.
+sweepExtensionTabs(null).catch(() => {});
 

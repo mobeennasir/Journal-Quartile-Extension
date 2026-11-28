@@ -61,6 +61,17 @@
     return "https://www.scimagojr.com/journalrank.php?year=" + encodeURIComponent(String(year));
   }
 
+  // SJR home page: light (no 32k-row table to render) and on the
+  // same origin, so it is the right page for the shared SJR tab
+  // when clearance is already fresh — the CSV fetch runs from
+  // this tab's context, no ranking page ever has to load. It is
+  // NOT a clearance page: the home page never challenges, so it
+  // can never earn clearance when none exists (see the note
+  // above); the challenged ranking page is still used then.
+  function sjrHomeUrl() {
+    return "https://www.scimagojr.com/";
+  }
+
   // Is this text a Cloudflare challenge page ("Just a moment...",
   // "Verify you are human") rather than the real page? Used to
   // poll a background tab until the managed challenge clears.
@@ -401,6 +412,7 @@
     parseDoajResponse: parseDoajResponse,
     mjlNotIndexedIsStable: mjlNotIndexedIsStable,
     sjrRankPageUrl: sjrRankPageUrl,
+    sjrHomeUrl: sjrHomeUrl,
     isChallengeText: isChallengeText,
     sjrClearanceIsFresh: sjrClearanceIsFresh,
     parseMjlSearchHtml: parseMjlSearchHtml,

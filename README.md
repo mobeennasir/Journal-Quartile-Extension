@@ -85,11 +85,11 @@ After any update, run `git pull` in the folder, then click **Reload** on the ext
 
 ## Status
 
-Version **0.4.3**, 27 November 2026. Tests pass: `node tests/run-tests.js` gives 448 passed, 0 failed (section 36 covers the HEC fallback, the HJRS import and the MJL stability fix). UI uses the Flame Q brand palette (flame orange, dark burgundy). The free WoS and SJR data are fetched automatically; the WoS category is read from the rendered Master Journal List page in the browser, and the SJR download runs through a browser tab when the direct download is blocked. A batch interrupted by the panel closing or the browser restarting can be resumed from where it stopped, and every WoS category fetched is saved in the extension database. Journals with no WoS category and no quartile get an HEC fallback: HEC Y, checked automatically against DOAJ or from an imported HEC recognised-journals list, always labelled as a fallback and never as a quartile.
+Version **0.4.4**, 28 November 2026. Tests pass: `node tests/run-tests.js` gives 490 passed, 0 failed (section 37 covers the ultra-fast SJR fetch, the first-tab leak fix, the live WoS progress, the full-tab batch view, the WoS button hiding after the automatic pass, and the auto-saved WoS/HEC status). UI uses the Flame Q brand palette (flame orange, dark burgundy). The free WoS and SJR data are fetched automatically; the WoS category is read from the rendered Master Journal List page in the browser, and the SJR download runs through one shared browser tab when the direct download is blocked. A batch interrupted by the panel closing or the browser restarting can be resumed from where it stopped, and every WoS category fetched is saved in the extension database. Journals with no WoS category and no quartile get an HEC fallback: HEC Y, checked automatically against DOAJ or from an imported HEC recognised-journals list, always labelled as a fallback and never as a quartile.
 
 ## Files
 
-- `manifest.json` - Manifest V3, version 0.4.3. Author: Mobeen Nasir.
+- `manifest.json` - Manifest V3, version 0.4.4. Author: Mobeen Nasir.
 - `sidepanel.html`, `popup.css`, `popup.js` - the side panel UI and logic. Plain HTML and JavaScript, no dependencies, no build step, no remotely hosted code.
 - `shared.js` - the one copy of the DOI logic, shared by the page and the service worker. Also holds the full-tab helpers and the upload file-type guard.
 - `freedata.js` - the free data without JCR: Master Journal List search URLs and parsing, SJR download URLs and checks, latest SJR year.

@@ -121,6 +121,22 @@ function sjrLatestYear() {
   return d.getMonth() >= 5 ? d.getFullYear() - 1 : d.getFullYear() - 2;
 }
 
+// Is the SJR clearance fresh (checked once per page load)?
+// When it is, the direct worker fetch is skipped: the Lax
+// clearance cookie is not sent on a cross-origin worker fetch,
+// so it 403s in ~1s and only delays the tab path that actually
+// works. When it is not fresh the direct fetch is still tried
+// first — it is the fast path when the site is not challenging.
+let sjrClearanceFreshCache = null;
+async function isSjrClearanceFresh() {
+  if (sjrClearanceFreshCache !== null) return sjrClearanceFreshCache;
+  try {
+    const res = await sendBackgroundMessage({ type: "sjrClearanceFresh" }, 10000);
+    sjrClearanceFreshCache = !!(res && res.fresh);
+  } catch (err) { sjrClearanceFreshCache = false; }
+  return sjrClearanceFreshCache;
+}
+
 // Fetch SJR data for one publication year, unless it is already
 // stored (and unexpired) or not released yet. Returns
 // { state, year }: "ready" (already stored), "fetched",
@@ -138,12 +154,15 @@ async function ensureSjrYear(year) {
   } catch (err) { /* fall through and try the fetch */ }
   if (sjrFetchInFlight.has(y)) return sjrFetchInFlight.get(y);
   const run = (async () => {
-    let res = await sendBackgroundMessage({ type: "fetchSjrExport", year: y }, 90000);
+    let res = null;
+    if (!(await isSjrClearanceFresh())) {
+      res = await sendBackgroundMessage({ type: "fetchSjrExport", year: y }, 90000);
+    }
     if (res && res.rows) {
       refreshImportStatus();
       return { state: "fetched", year: y, rows: res.rows };
     }
-    if (res && (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
+    if (!res || (res.error === "blocked" || res.error === "not-csv" || res.error === "failed" || res.error === "timeout")) {
       // Tab budget 180s: background tab (load <= 20s + poll
       // <= 10s with clearance on record, 30s without) and, only
       // if the background hit a challenge, a visible tab (load
@@ -997,22 +1016,13 @@ function refreshImportStatus() {
     } else {
       sjrStatusEl.textContent = "No SJR data imported yet.";
     }
-    const mjlFile = latestFile(meta.mjlFiles);
-    if (meta.mjlRows && mjlFile && mjlFile.importedAt) {
-      mjlStatusEl.textContent = `WoS list: ${meta.mjlRows} journals stored. ${DATA.validUntilText(mjlFile.importedAt, "mjl")}.`;
-    } else if (meta.mjlRows) {
-      mjlStatusEl.textContent = `WoS list: ${meta.mjlRows} journals stored.`;
-    } else {
-      mjlStatusEl.textContent = "No WoS list imported yet.";
-    }
-    const hecFile = latestFile(meta.hecFiles || []);
-    if (meta.hecRows && hecFile && hecFile.importedAt) {
-      hecStatusEl.textContent = `HEC data: ${meta.hecRows} journals stored. ${DATA.validUntilText(hecFile.importedAt, "mjl")}. Fallback only, never shown as JCR or WoS.`;
-    } else if (meta.hecRows) {
-      hecStatusEl.textContent = `HEC data: ${meta.hecRows} journals stored. Fallback only, never shown as JCR or WoS.`;
-    } else {
-      hecStatusEl.textContent = "No HEC data imported yet. HEC Y is checked automatically via DOAJ.";
-    }
+    // Auto-saved categories (per-article checks) are not a list
+    // file: the status says which one it was — "40 journals
+    // stored automatically (per-article checks)" instead of
+    // "No WoS list imported yet" after a batch that saved 40.
+    // (See DATA.mjlStatusText / DATA.hecStatusText.)
+    mjlStatusEl.textContent = DATA.mjlStatusText(meta);
+    hecStatusEl.textContent = DATA.hecStatusText(meta);
     renderFreeDataStatus(meta);
   }).catch(() => { /* status stays as the default text */ });
 }
@@ -1347,6 +1357,9 @@ if (sjrFetchBtn) {
       refreshImportStatus();
     } finally {
       sjrFetchBtn.disabled = false;
+      // The shared SJR tab is done being used by this fetch:
+      // close it now instead of leaving it for the next sweep.
+      sendSweepTabs();
     }
   });
 }
@@ -1517,6 +1530,11 @@ function batchRowToResult(row, found, rank, note, sjrState) {
     // "network"). No skipped row is left unexplained.
     status: found ? "found" : "not-found",
     notFoundKind: "",
+    // Whether the WoS pass gave this row a DEFINITIVE answer
+    // (a category, or a stable not-indexed). Errors and timeouts
+    // leave it false, so the manual re-check button stays
+    // available for exactly those rows.
+    wosChecked: false,
     // How this row's SJR year was obtained ("ready" = already
     // stored, "fetched" = fresh download, "blocked" etc.) — the
     // SJR cell says so instead of going blank.
@@ -1541,6 +1559,9 @@ async function runBatch(rows, opts) {
   const startIndex = (opts && opts.startIndex) | 0;
   const resuming = startIndex > 0 && opts && Array.isArray(opts.existingResults);
   batchResults = resuming ? opts.existingResults.slice() : [];
+  // This page now owns the shared batch live state: the full
+  // tab follows it (see saveBatchLiveState).
+  batchLiveOwner = true;
   // A fresh run discards any saved state from an earlier batch;
   // a resume keeps it until this run finishes or stops again.
   if (!resuming) clearBatchState();
@@ -1570,13 +1591,34 @@ async function runBatch(rows, opts) {
     if (k && !seenDois.has(k)) seenDois.set(k, idx + 1);
   });
   const sjrYearOutcomes = new Map(); // year -> ensureSjrYear outcome (one attempt per distinct year)
+  // Prefetch SJR for every distinct year in the file, in
+  // parallel (at most 3 at once): the years are in the rows
+  // themselves, so the fetches start before the first row is
+  // checked instead of one year at a time as rows arrive.
+  // ensureSjrYear dedupes per year, so the row loop reuses the
+  // same in-flight promise. Fire and forget: the row loop
+  // awaits the year it needs, and the outcomes land in the
+  // same map the tag reads.
+  const batchYears = [...new Set(rows.map((r) => r.year).filter((y) => y && parseInt(y, 10) <= sjrLatestYear()))];
+  let prefetchIdx = 0;
+  const prefetchNext = () => {
+    if (prefetchIdx >= batchYears.length) return Promise.resolve();
+    const y = batchYears[prefetchIdx++];
+    return ensureSjrYear(y).then((o) => {
+      sjrYearOutcomes.set(y, o);
+      updateBatchSjrStatus(sjrYearOutcomes);
+      saveBatchLiveState(false);
+    }).catch(() => {}).then(prefetchNext);
+  };
+  for (let k = 0; k < 3; k++) prefetchNext();
   let finished = false;
   let stopped = false;
   try {
   for (let i = startIndex; i < rows.length; i++) {
     const row = rows[i];
-    batchStatusEl.textContent = `Checking article ${i + 1} of ${rows.length}: ${row.title.slice(0, 60)}…`;
+    setBatchStatus(`Checking article ${i + 1} of ${rows.length}: ${row.title.slice(0, 60)}…`);
     batchProgressBarEl.style.width = Math.round((i / rows.length) * 100) + "%";
+    saveBatchLiveState(false);
     let result;
     try {
       let article = null;
@@ -1631,10 +1673,11 @@ async function runBatch(rows, opts) {
           if (sjrYearOutcomes.has(year)) {
             ensured = sjrYearOutcomes.get(year);
           } else {
-            batchStatusEl.textContent = `Checking article ${i + 1} of ${rows.length}: getting SJR data for ${year}…`;
+            setBatchStatus(`Checking article ${i + 1} of ${rows.length}: getting SJR data for ${year}…`);
             ensured = await ensureSjrYear(year);
             sjrYearOutcomes.set(year, ensured);
             updateBatchSjrStatus(sjrYearOutcomes);
+            saveBatchLiveState(false);
           }
           sjrState = ensured.state;
           if (ensured.state === "fetched") {
@@ -1670,7 +1713,7 @@ async function runBatch(rows, opts) {
     saveBatchState(rows, batchResults, i + 1);
     // No table row: the panel just counts — "12 of 65 articles
     // done" — and the per-row results live only in the CSV.
-    batchStatusEl.textContent = `${i + 1} of ${rows.length} articles done`;
+    setBatchStatus(`${i + 1} of ${rows.length} articles done`);
     await sleep(500); // polite pacing for the Crossref polite pool
     // Stop finishes the row it is on, then stops here.
     if (batchStopRequested) { stopped = true; break; }
@@ -1683,7 +1726,9 @@ async function runBatch(rows, opts) {
   if (!finished) {
     // The loop stopped early (unexpected error outside a row):
     // results are incomplete, so the download stays hidden.
-    batchStatusEl.textContent = "Batch stopped early — results are incomplete, download is hidden.";
+    setBatchStatus("Batch stopped early — results are incomplete, download is hidden.");
+    saveBatchLiveState(true);
+    sendSweepTabs();
     return;
   }
   if (stopped) {
@@ -1697,13 +1742,22 @@ async function runBatch(rows, opts) {
     batchResultsEl.hidden = false;
     if (batchMjlBtn) { batchMjlBtn.hidden = false; batchMjlBtn.disabled = true; }
     batchProgressBarEl.style.width = Math.round((batchResults.length / rows.length) * 100) + "%";
-    batchStatusEl.textContent = `Batch stopped at ${batchResults.length} of ${rows.length} articles — results are partial. Fetching WoS categories…`;
-    const wosStopped = await fetchBatchWoSCategories();
+    const stoppedPrefix = `Batch stopped at ${batchResults.length} of ${rows.length} articles — results are partial.`;
+    setBatchStatus(stoppedPrefix + " Fetching WoS categories…");
+    const wosStopped = await fetchBatchWoSCategories((p) => {
+      setBatchStatus(stoppedPrefix + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound));
+    });
     batchDownloadBtn.hidden = false;
-    if (batchMjlBtn) batchMjlBtn.disabled = false;
-    batchStatusEl.textContent = `Batch stopped at ${batchResults.length} of ${rows.length} articles — results are partial. ${wosPassText(wosStopped)} Resume to continue from where it stopped.`;
+    updateBatchMjlButton();
+    setBatchStatus(stoppedPrefix + " " + wosPassText(wosStopped) + " Resume to continue from where it stopped.");
+    // The Import section must show what the pass actually
+    // saved, not the text from when the panel opened.
+    refreshImportStatus();
+    saveBatchLiveState(true);
+    sendSweepTabs();
     pendingBatchState = { rows: rows, results: batchResults.slice(), nextIndex: batchResults.length, savedAt: new Date().toISOString() };
     if (batchResumeBtn) batchResumeBtn.hidden = false;
+    saveBatchLiveState(true);
     return;
   }
   // Finished: no resume state to keep.
@@ -1727,14 +1781,123 @@ async function runBatch(rows, opts) {
   // finishes — no click needed (27 Nov 2026). The download
   // stays hidden until this pass finishes, so the CSV never
   // has blank WoS columns because the fetch had not run.
-  batchStatusEl.textContent = batchSummary + " Fetching WoS categories…";
-  const wos = await fetchBatchWoSCategories();
+  // The pass reports live progress in the same status area.
+  setBatchStatus(batchSummary + " Fetching WoS categories…");
+  const wos = await fetchBatchWoSCategories((p) => {
+    setBatchStatus(batchSummary + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound));
+  });
   batchDownloadBtn.hidden = false;
-  if (batchMjlBtn) batchMjlBtn.disabled = false;
-  batchStatusEl.textContent = batchSummary + " " + wosPassText(wos);
+  updateBatchMjlButton();
+  setBatchStatus(batchSummary + " " + wosPassText(wos));
+  // The Import section must show what the pass actually saved,
+  // not the text from when the panel opened (the "not saved"
+  // report, 28 Nov 2026: the rows WERE in the store, the
+  // status line was never refreshed after the pass).
+  refreshImportStatus();
+  saveBatchLiveState(true);
+  sendSweepTabs();
   if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
     chrome.storage.local.set({ lastBatch: batchResults });
   }
+}
+
+// ---- Batch live state (28 Nov 2026) ----
+// The side panel and the full tab are two pages: batch progress
+// used to live only in the panel page's memory, so the full tab
+// opened fresh. The page that runs the batch now writes this
+// small state to chrome.storage.local as the batch runs, and any
+// other page renders it on open and on change (see
+// restoreBatchLiveState + the storage listener below).
+let batchLiveOwner = false;
+
+function buildCurrentBatchLiveState(finished) {
+  return DATA.buildBatchLiveState({
+    status: batchStatusEl ? batchStatusEl.textContent : "",
+    sjrTag: batchSjrStatusEl ? batchSjrStatusEl.textContent : "",
+    progressPct: batchProgressBarEl ? parseFloat(batchProgressBarEl.style.width) || 0 : 0,
+    resultsHidden: batchResultsEl ? !!batchResultsEl.hidden : true,
+    downloadHidden: batchDownloadBtn ? !!batchDownloadBtn.hidden : true,
+    mjlHidden: batchMjlBtn ? !!batchMjlBtn.hidden : true,
+    stopHidden: batchStopBtn ? !!batchStopBtn.hidden : true,
+    resumeHidden: batchResumeBtn ? !!batchResumeBtn.hidden : true,
+    progressHidden: batchProgressEl ? !!batchProgressEl.hidden : true,
+    finished: !!finished,
+  });
+}
+
+function saveBatchLiveState(finished) {
+  if (!batchLiveOwner) return;
+  if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+  try { chrome.storage.local.set({ batchLive: buildCurrentBatchLiveState(finished) }, () => {}); } catch (err) { /* best-effort */ }
+}
+
+// Set the batch status line AND publish it to the shared live
+// state, so the full tab shows the same line at the same time.
+function setBatchStatus(text) {
+  if (batchStatusEl) batchStatusEl.textContent = text;
+  saveBatchLiveState(false);
+}
+
+function renderBatchLiveState(state) {
+  if (!state) return;
+  if (batchStatusEl && typeof state.status === "string") batchStatusEl.textContent = state.status;
+  if (batchSjrStatusEl && typeof state.sjrTag === "string") batchSjrStatusEl.textContent = state.sjrTag;
+  if (batchProgressBarEl && typeof state.progressPct === "number") batchProgressBarEl.style.width = state.progressPct + "%";
+  if (batchResultsEl) batchResultsEl.hidden = !!state.resultsHidden;
+  if (batchDownloadBtn) batchDownloadBtn.hidden = !!state.downloadHidden;
+  if (batchMjlBtn) batchMjlBtn.hidden = !!state.mjlHidden;
+  if (batchStopBtn) batchStopBtn.hidden = !!state.stopHidden;
+  if (batchResumeBtn) batchResumeBtn.hidden = !!state.resumeHidden;
+  if (batchProgressEl) batchProgressEl.hidden = !!state.progressHidden;
+}
+
+function restoreBatchLiveState() {
+  if (typeof chrome === "undefined" || !chrome.storage || !chrome.storage.local) return;
+  try {
+    chrome.storage.local.get(["batchLive", "lastBatch", "batchState"], (r) => {
+      const state = r && r.batchLive;
+      if (!state || !DATA.batchLiveStateIsFresh(state, Date.now())) return;
+      // A mid-batch state with a saved resume point is stale:
+      // the owner stopped (panel closed, browser restarted) and
+      // the resume offer owns the status, not this snapshot.
+      // A finished state has no resume point, so it renders.
+      if (!state.finished && r.batchState) return;
+      renderBatchLiveState(state);
+      // A finished batch's results come back too, so the
+      // Download button works in the full tab as well.
+      if (state.finished && Array.isArray(r.lastBatch) && r.lastBatch.length && !batchResults.length) {
+        batchResults = r.lastBatch;
+      }
+    });
+  } catch (err) { /* best-effort */ }
+}
+
+// A page that is NOT running the batch follows the shared state
+// live: opening the full tab mid-batch shows live progress,
+// opening it after shows the finished results.
+if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes.batchLive || batchLiveOwner) return;
+    renderBatchLiveState(changes.batchLive.newValue);
+  });
+}
+
+// The manual re-check button only ever shows when some row
+// still needs a check (has ISSNs, no category, never
+// definitively checked). After the automatic WoS pass it is
+// hidden unless a row failed or timed out.
+function updateBatchMjlButton() {
+  if (!batchMjlBtn) return;
+  const need = DATA.batchRowsNeedingWosCheck(batchResults);
+  batchMjlBtn.hidden = need === 0;
+  batchMjlBtn.disabled = false;
+}
+
+// Close any leftover SJR/MJL tab the extension opened (the
+// first-tab leak safety net): at batch end, after the WoS pass
+// has finished, so no fetch is still using a tab.
+function sendSweepTabs() {
+  sendBackgroundMessage({ type: "sweepTabs" }, 10000).catch(() => {});
 }
 
 batchRunBtn.addEventListener("click", async () => {
@@ -1792,13 +1955,23 @@ batchDownloadBtn.addEventListener("click", () => {
 // are stored until expiry, so the next batch for the same
 // journals is instant.
 // Returns { checked, found, saved, hecFound }.
-async function fetchBatchWoSCategories() {
+// onProgress, when given, is called after every checked row
+// with { checked, total, hecFound }, so the batch status can
+// show the WoS pass progressing live in the same status area.
+async function fetchBatchWoSCategories(onProgress) {
   let checked = 0, found = 0, saved = 0, hecFound = 0;
+  const totalToCheck = batchResults.filter((r) => r.issns && r.issns.length && !(r.rank && r.rank.wosCategory)).length;
+  if (typeof onProgress === "function") onProgress({ checked: 0, total: totalToCheck, hecFound: 0 });
   for (let i = 0; i < batchResults.length; i++) {
     const r = batchResults[i];
     if (!r.issns || !r.issns.length || (r.rank && r.rank.wosCategory)) continue;
     const res = await fetchMjlCategory(r.issns, r.journal);
     checked++;
+    // A category OR a stable not-indexed is a definitive
+    // answer: the row was checked. An error or timeout is not,
+    // so the manual re-check button stays available for it.
+    r.wosChecked = !!(res && (res.category || res.notIndexed));
+    if (typeof onProgress === "function") onProgress({ checked, total: totalToCheck, hecFound });
     if (res && res.category) {
       found++;
       if (res.stored) saved++;
@@ -1852,6 +2025,8 @@ if (batchMjlBtn) {
     try {
       const wos = await fetchBatchWoSCategories();
       batchStatusEl.textContent = wosPassText(wos);
+      updateBatchMjlButton();
+      saveBatchLiveState(false);
     } finally {
       batchMjlBtn.disabled = false;
       refreshImportStatus();
@@ -1861,3 +2036,8 @@ if (batchMjlBtn) {
 
 // Show the current import status when the panel opens.
 refreshImportStatus();
+
+// Show the shared batch progress when this page opens: the
+// full tab renders the same batch the side panel is running
+// (mid-batch progress, or the finished results + download).
+restoreBatchLiveState();

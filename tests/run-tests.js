@@ -524,8 +524,8 @@ async function main() {
   check("background handles fetchMjlCategory and fetchSjrExport messages",
     bgJs.indexOf('message.type === "fetchMjlCategory"') !== -1
     && bgJs.indexOf('message.type === "fetchSjrExport"') !== -1);
-  check("manifest is 0.4.3 with MJL, SJR and DOAJ host permissions",
-    manifest.version === "0.4.3"
+  check("manifest is 0.4.4 with MJL, SJR and DOAJ host permissions",
+    manifest.version === "0.4.4"
     && manifest.host_permissions.indexOf("https://mjl.clarivate.com/*") !== -1
     && manifest.host_permissions.indexOf("https://www.scimagojr.com/*") !== -1
     && manifest.host_permissions.indexOf("https://scimagojr.com/*") !== -1
@@ -615,9 +615,17 @@ async function main() {
     bgJs.indexOf("chrome.tabs.remove(tabId)") !== -1);
   check("background caches WoS answers in memory so a batch does not re-tab the same journal",
     bgJs.indexOf("mjlCategoryCache") !== -1 && bgJs.indexOf("mjlCategoryCache.has(cacheKey)") !== -1);
-  check("background SJR tab path opens the challenged ranking page, not the home page",
+  // SUPERSEDED 28 Nov 2026 (shared SJR tab): the home page IS
+  // opened now, but ONLY when clearance is already fresh — the
+  // light home page, no ranking page load. When clearance must
+  // still be earned, the challenged ranking page is opened
+  // (and the visible escalation uses it too). The old rule
+  // "never open the home page" was about using it AS a
+  // clearance tab, which never worked.
+  check("background SJR tab path opens the challenged ranking page when clearance must be earned, home page only when fresh",
     bgJs.indexOf("chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })") !== -1
-    && bgJs.indexOf("FREE.sjrHomeUrl") === -1);
+    && bgJs.indexOf("const url = fresh ? FREE.sjrHomeUrl() : FREE.sjrRankPageUrl(year);") !== -1
+    && bgJs.indexOf("FREE.sjrHomeUrl") > bgJs.indexOf("async function getSjrSharedTab"));
   check("background SJR fetch sends cookies (clearance) with the request",
     bgJs.indexOf('credentials: credentials || "same-origin"') !== -1
     && bgJs.indexOf('fetchTextTimeout(url, 15000, "text/csv, */*", "include")') !== -1);
@@ -1043,15 +1051,17 @@ async function main() {
   // (d) The worker's direct fetch could eat the whole 90s budget
   // (60s x 3 URLs) before the tab path was ever tried.
   const bgJs31 = fs.readFileSync(path.join(__dirname, "..", "background.js"), "utf8");
-  // SUPERSEDED 27 Nov 2026 (user order, tab policy): the SJR tab
-  // opens in the BACKGROUND first; a visible tab is forced only
-  // when the background tab actually hits a Cloudflare check
-  // (see section 35). Both creates exist, background first.
+  // SUPERSEDED 28 Nov 2026 (shared SJR tab): the background
+  // create is now `chrome.tabs.create({ url, active: false })`
+  // in getSjrSharedTab — url is the light home page when
+  // clearance is fresh, the challenged ranking page otherwise —
+  // and a visible tab is still forced only on a challenge.
+  // Both creates exist, background first.
   check("fetchSjrViaTab opens the tab in the background first, visible only on a challenge",
-    bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })') !== -1
-    && bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })') !== -1
-    && bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })')
-      < bgJs31.indexOf('chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })'));
+    bgJs31.indexOf("chrome.tabs.create({ url, active: false })") !== -1
+    && bgJs31.indexOf("chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })") !== -1
+    && bgJs31.indexOf("chrome.tabs.create({ url, active: false })")
+      < bgJs31.indexOf("chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: true })"));
   check("MJL tab poll runs up to ~45s (23 x 2s) with a stability gate on 'not indexed', not 30s",
     bgJs31.indexOf("for (let i = 0; i < 23; i++)") !== -1
     && bgJs31.indexOf("mjlNotIndexedIsStable") !== -1);
@@ -1178,7 +1188,7 @@ async function main() {
   // executeScript). MV3 guidance says to keep executeScript
   // results small and to stream many-megabyte payloads in
   // chunks instead. The CSV is now stored on the tab's window
-  // and read back in 512 KB slices.
+  // (per-year key) and read back in 4 MB slices.
   // (c) Second bug, proven the same day: the site's own Download
   // link is `journalrank.php?out=xls` with NO year parameter —
   // it exports the site's default (latest) year. The old code
@@ -1210,7 +1220,7 @@ async function main() {
   }
   const bgJs33 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
   const sjrInTabSrc = extractSjrInTabFetch(bgJs33);
-  check("sjrInTabFetch is extractable from background.js (self-contained)", sjrInTabSrc !== null && sjrInTabSrc.indexOf("window.__sjrCsv") !== -1);
+  check("sjrInTabFetch is extractable from background.js (self-contained, per-year window key)", sjrInTabSrc !== null && sjrInTabSrc.indexOf('window["__sjrCsv_" + year]') !== -1);
   const sjrInTabFetch = sjrInTabSrc ? eval("(" + sjrInTabSrc + ")") : null;
   const synth2020 = "Rank;Sourceid;Title;Type;Issn;Publisher;SJR;SJR Best Quartile;H index;Total Docs. (2020)\n1;123;Test Journal;journal;12345678;Test Pub;1,234;Q2;10;5\n";
   const urlsForYear = (y) => [
@@ -1242,27 +1252,29 @@ async function main() {
     check("clearance present, 2025: in-tab fetch returns ok with a small ack, not the whole CSV",
       rA.ok === true && !("text" in rA) && rA.length === realSjrFull.length && rA.year === 2025,
       "length " + rA.length + ", year " + rA.year);
-    check("clearance present, 2025: the CSV is stored on the tab window for chunked read-back",
-      (global.window.__sjrCsv || "") === realSjrFull);
-    // Chunked read-back: 512 KB slices rejoin to the identical text.
-    const CHUNK = 512 * 1024;
+    check("clearance present, 2025: the CSV is stored on the tab window for chunked read-back (per-year key)",
+      (global.window.__sjrCsv_2025 || "") === realSjrFull);
+    // Chunked read-back: 4 MB slices rejoin to the identical
+    // text (was 512 KB / 22 slices: an ~11 MB file now needs 3
+    // round trips, not 22).
+    const CHUNK = 4 * 1024 * 1024;
     let back = "";
-    for (let s = 0; s < rA.length; s += CHUNK) back += (global.window.__sjrCsv || "").slice(s, s + CHUNK);
-    check("chunked read-back (512 KB slices) rejoins to the identical CSV",
+    for (let s = 0; s < rA.length; s += CHUNK) back += (global.window.__sjrCsv_2025 || "").slice(s, s + CHUNK);
+    check("chunked read-back (4 MB slices) rejoins to the identical CSV",
       back === realSjrFull, "slices " + Math.ceil(rA.length / CHUNK));
     // Case B — 2020: the site's year-less Download link is
     // skipped and the year-specific URL supplies the 2020 file.
     mockTab((u) => (u.indexOf("year=2020") !== -1 ? synth2020 : realSjrFull), 2020);
     const rB = await sjrInTabFetch(urlsForYear(2020), 2020, "store", 90000);
     check("2020: year-less site link is skipped, year URL supplies the 2020 file",
-      rB.ok === true && rB.year === 2020 && (global.window.__sjrCsv || "").indexOf("Total Docs. (2020)") !== -1,
+      rB.ok === true && rB.year === 2020 && (global.window.__sjrCsv_2020 || "").indexOf("Total Docs. (2020)") !== -1,
       "year " + rB.year);
     // Case C — 2020, but every URL returns the 2025 file: the
     // wrong-year file is refused, never stored.
     mockTab(() => realSjrFull, 2020);
     const rC = await sjrInTabFetch(urlsForYear(2020), 2020, "store", 90000);
     check("2020 with only the 2025 file on offer: refused as wrong-year, nothing stored",
-      rC.ok === false && (rC.tried || []).every((t) => t.kind === "wrong-year") && !global.window.__sjrCsv,
+      rC.ok === false && (rC.tried || []).every((t) => t.kind === "wrong-year") && !global.window.__sjrCsv_2020,
       JSON.stringify((rC.tried || []).map((t) => t.kind)));
     delete global.window;
     delete global.document;
@@ -1274,9 +1286,9 @@ async function main() {
   check("worker importSjrText rejects a wrong-year file before storing (header-year guard)",
     bgJs33.indexOf("FREE.sjrCsvYear(text)") !== -1
     && bgJs33.indexOf("wrongYear: fileYear") !== -1);
-  check("worker reads the stored CSV back in 512 KB slices, with a single-return fallback",
-    bgJs33.indexOf("const CHUNK = 512 * 1024;") !== -1
-    && bgJs33.indexOf('func: (s, l) => (window.__sjrCsv || "").slice(s, s + l)') !== -1
+  check("worker reads the stored CSV back in 4 MB slices, with a single-return fallback",
+    bgJs33.indexOf("const CHUNK = 4 * 1024 * 1024;") !== -1
+    && bgJs33.indexOf('func: (s, l, y) => ((window["__sjrCsv_" + y]) || "").slice(s, s + l)') !== -1
     && bgJs33.indexOf("async function fetchSjrCsvInTabSingle(tabId, year)") !== -1);
   check("tab-fetch outcome records the failure detail for late recovery",
     bgJs33.indexOf('detail: outcome.detail || ""') !== -1);
@@ -1346,8 +1358,8 @@ async function main() {
   check("manifest name and author are the owner's, no internal Phase label",
     manifest34.name === "Journal Quartile Extension" && manifest34.author === "Mobeen Nasir"
     && manifest34.name.indexOf("Phase") === -1 && String(manifest34.action.default_title).indexOf("Phase") === -1);
-  check("manifest is MV3, version 0.4.3, host permissions scoped",
-    manifest34.manifest_version === 3 && manifest34.version === "0.4.3"
+  check("manifest is MV3, version 0.4.4, host permissions scoped",
+    manifest34.manifest_version === 3 && manifest34.version === "0.4.4"
     && manifest34.host_permissions.indexOf("<all_urls>") === -1
     && manifest34.host_permissions.every((h) => h.indexOf("*://*/*") === -1));
   const pngSize = (file) => {
@@ -1360,8 +1372,8 @@ async function main() {
   check("side panel open trigger uses openPanelOnActionClick",
     fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8").indexOf("openPanelOnActionClick: true") !== -1);
   const readme34 = fs.readFileSync(path.join(DIR, "..", "README.md"), "utf8");
-  check("README states version 0.4.3 and has no em or en dashes",
-    readme34.indexOf("0.4.3") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
+  check("README states version 0.4.4 and has no em or en dashes",
+    readme34.indexOf("0.4.4") !== -1 && readme34.indexOf("\u2014") === -1 && readme34.indexOf("\u2013") === -1);
   // Security: no code execution from data, no secrets, no trackers.
   const allJs34 = ["popup.js", "background.js", "jcr.js", "shared.js", "net.js", "freedata.js"]
     .map((f) => fs.readFileSync(path.join(DIR, "..", f), "utf8")).join("\n");
@@ -1427,9 +1439,15 @@ async function main() {
     && FREE35.sjrClearanceIsFresh("not-a-date", now35) === false);
   // (3) Tab policy in background.js: background first, visible
   // only on a real challenge; clearance recorded on every clear.
+  // SUPERSEDED 28 Nov 2026 (shared SJR tab): the background
+  // create is `chrome.tabs.create({ url, active: false })` in
+  // getSjrSharedTab — url is the home page when clearance is
+  // fresh, the ranking page otherwise — and the tab is reused
+  // for every year instead of one tab per year.
   const bgJs35 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
   check("SJR tab opens in the background first, never visible by default",
-    bgJs35.indexOf("chrome.tabs.create({ url: FREE.sjrRankPageUrl(year), active: false })") !== -1);
+    bgJs35.indexOf("chrome.tabs.create({ url, active: false })") !== -1
+    && bgJs35.indexOf("async function getSjrSharedTab(year)") !== -1);
   check("a visible SJR tab is created only in the escalation branch",
     (bgJs35.match(/chrome\.tabs\.create\(\{ url: FREE\.sjrRankPageUrl\(year\), active: true \}\)/g) || []).length === 1
     && bgJs35.indexOf("active: true })") > bgJs35.indexOf("active: false })"));
@@ -1472,20 +1490,26 @@ async function main() {
       (await poll(1, 1500)) === "timeout");
   }
   // (4)+(5) Auto WoS + download gating in popup.js.
+  // SUPERSEDED 28 Nov 2026: the pass takes an optional
+  // onProgress callback (live "N of M checked" in the status
+  // area); the batch calls pass one, the manual button calls
+  // with no arguments.
   check("WoS pass is a shared function used by the batch and the button",
-    popupJs35.indexOf("async function fetchBatchWoSCategories()") !== -1
-    && popupJs35.indexOf("const wos = await fetchBatchWoSCategories();") !== -1
-    && popupJs35.indexOf("const wosStopped = await fetchBatchWoSCategories();") !== -1);
+    popupJs35.indexOf("async function fetchBatchWoSCategories(onProgress)") !== -1
+    && popupJs35.indexOf("const wos = await fetchBatchWoSCategories((p) => {") !== -1
+    && popupJs35.indexOf("const wosStopped = await fetchBatchWoSCategories((p) => {") !== -1
+    && popupJs35.indexOf("const wos = await fetchBatchWoSCategories();") !== -1);
   const finishSeg = popupJs35.slice(popupJs35.indexOf("// Finished: no resume state to keep."));
   check("finished batch runs the WoS pass BEFORE the download is shown",
-    finishSeg.indexOf("await fetchBatchWoSCategories();") !== -1
-    && finishSeg.indexOf("await fetchBatchWoSCategories();") < finishSeg.indexOf("batchDownloadBtn.hidden = false;"));
+    finishSeg.indexOf("await fetchBatchWoSCategories(") !== -1
+    && finishSeg.indexOf("await fetchBatchWoSCategories(") < finishSeg.indexOf("batchDownloadBtn.hidden = false;"));
   check("finished batch says what is still running while WoS fetches",
-    popupJs35.indexOf('batchSummary + " Fetching WoS categories…";') !== -1);
+    popupJs35.indexOf('setBatchStatus(batchSummary + " Fetching WoS categories…");') !== -1
+    && popupJs35.indexOf("DATA.wosProgressText(p.checked, p.total, p.hecFound)") !== -1);
   const stopSeg = popupJs35.slice(popupJs35.indexOf("if (stopped) {"), popupJs35.indexOf("// Finished: no resume state to keep."));
   check("stopped batch also runs the WoS pass before showing the download",
-    stopSeg.indexOf("await fetchBatchWoSCategories();") !== -1
-    && stopSeg.indexOf("await fetchBatchWoSCategories();") < stopSeg.indexOf("batchDownloadBtn.hidden = false;"));
+    stopSeg.indexOf("await fetchBatchWoSCategories(") !== -1
+    && stopSeg.indexOf("await fetchBatchWoSCategories(") < stopSeg.indexOf("batchDownloadBtn.hidden = false;"));
   check("manual WoS button stays as a re-check, not a requirement",
     popupJs35.indexOf("manual re-check") !== -1
     && popupJs35.indexOf('id="batch-mjl"') === -1); // button lives in sidepanel.html, not popup.js
@@ -1649,8 +1673,433 @@ async function main() {
     panel36.indexOf('id="hec-file"') !== -1 && panel36.indexOf('id="hec-import"') !== -1
     && panel36.indexOf('id="hec-status"') !== -1 && panel36.indexOf("Import HEC data") !== -1);
   const manifest36 = JSON.parse(fs.readFileSync(path.join(DIR, "..", "manifest.json"), "utf8"));
-  check("manifest: doaj.org host permission added, version 0.4.3",
-    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.3");
+  check("manifest: doaj.org host permission added, version 0.4.4",
+    manifest36.host_permissions.indexOf("https://doaj.org/*") !== -1 && manifest36.version === "0.4.4");
+
+  console.log("== 37. Batch fixes: SJR ultra-fast shared tab, first-tab leak, WoS progress, full-tab progress, WoS button, saved-status, 57/40 (28 Nov 2026) ==");
+  // The user ran the v0.4.3 Naqqash batch (65 articles) and
+  // reported 7 things: SJR auto-fetch is slow (first 2-3 years
+  // slowest, later ones only a few seconds faster), the first
+  // row's tab never closes, no WoS progress is shown, the full
+  // tab opens fresh, the WoS button reappears after the batch,
+  // the Import section says no WoS/HEC data was saved, and the
+  // 57/40 numbers need explaining. Each fix below is tested
+  // here; the mock tab tests run with a fake clock so they
+  // finish in milliseconds, not minutes.
+  const bgJs37 = fs.readFileSync(path.join(DIR, "..", "background.js"), "utf8");
+  const popupJs37 = fs.readFileSync(path.join(DIR, "..", "popup.js"), "utf8");
+
+  // (6) WoS/HEC "not saved": the rows WERE in the store — the
+  // Import status was never refreshed after the automatic pass,
+  // so it still showed the text from when the panel opened.
+  // Proof: 40 auto-saved WoS rows and 2 HEC rows persist, and
+  // the status text now says so.
+  const store37 = new DATA.MemoryStore();
+  const mjlAutoRows = [];
+  for (let i = 0; i < 40; i++) mjlAutoRows.push({ issn: String(10000000 + i), journal: "Journal " + i, year: null, quartile: "", jif: null, wosIndex: "SCIE", wosCategory: "W", category: "", sourceFile: "Master Journal List (automatic)", editionYear: null });
+  await store37.putMjl(mjlAutoRows, { fileName: "Master Journal List (automatic)", rows: 40, importedAt: "2026-11-28T09:00:00.000Z", expires: DATA.mjlExpiresAt("2026-11-28") });
+  await store37.putHec([
+    { issn: "26168758", journal: "FUUAST Journal of Biology", year: null, quartile: "", jif: null, wosIndex: "", wosCategory: "", category: "Y", sourceFile: "DOAJ (automatic)", editionYear: null },
+    { issn: "2710222X", journal: "NUST Journal of Natural Sciences", year: null, quartile: "", jif: null, wosIndex: "", wosCategory: "", category: "Y", sourceFile: "DOAJ (automatic)", editionYear: null },
+  ], { fileName: "DOAJ (automatic)", rows: 2, importedAt: "2026-11-28T09:00:00.000Z", expires: DATA.sjrExpiresAt("2026-11-28") });
+  const meta37 = await store37.getMeta();
+  check("WoS/HEC storage proof: 40 auto-saved WoS rows and 2 HEC rows persist in the store (counted, not assumed)",
+    meta37.mjlRows === 40 && meta37.hecRows === 2, "mjlRows=" + meta37.mjlRows + " hecRows=" + meta37.hecRows);
+  check("WoS auto-saved rows look up by ISSN (the next batch is instant)",
+    (await store37.getMjl(["10000000"])).category === "W");
+  check("mjlStatusText: 40 auto-saved rows say 'stored automatically (per-article checks)', not 'no list imported'",
+    DATA.mjlStatusText(meta37).indexOf("40 journals stored automatically (per-article checks)") !== -1
+    && DATA.mjlStatusText(meta37).indexOf("Valid until November 2027") !== -1);
+  check("mjlStatusText: a list-file import says so, and no rows says categories are checked per article",
+    DATA.mjlStatusText({ mjlRows: 5, mjlFiles: [{ fileName: "mjl.csv", importedAt: "2026-11-28T09:00:00.000Z" }] }).indexOf("from an imported list file") !== -1
+    && DATA.mjlStatusText({ mjlRows: 0 }).indexOf("No WoS list imported yet. Categories are checked per article") === 0);
+  check("hecStatusText: 2 saved rows say 'stored (DOAJ check, fallback only)', none says the check runs automatically",
+    DATA.hecStatusText(meta37).indexOf("2 journals stored (DOAJ check, fallback only)") !== -1
+    && DATA.hecStatusText({ hecRows: 0 }).indexOf("No HEC data saved yet. The HEC Y check runs automatically from DOAJ") === 0);
+  check("refreshImportStatus uses the auto-vs-file status helpers",
+    popupJs37.indexOf("mjlStatusEl.textContent = DATA.mjlStatusText(meta);") !== -1
+    && popupJs37.indexOf("hecStatusEl.textContent = DATA.hecStatusText(meta);") !== -1);
+  check("runBatch refreshes the Import status after the automatic WoS pass (finished AND stopped)",
+    popupJs37.indexOf("refreshImportStatus();\n    saveBatchLiveState(true);") !== -1);
+
+  // (3) WoS progress, shown live in the same status area.
+  check("wosProgressText: 'Fetching WoS categories... N of M checked', HEC count appended when found",
+    DATA.wosProgressText(0, 55, 0) === "Fetching WoS categories... 0 of 55 checked"
+    && DATA.wosProgressText(3, 55, 2) === "Fetching WoS categories... 3 of 55 checked (HEC Y: 2 found)"
+    && DATA.wosProgressText(55, 55, 0) === "Fetching WoS categories... 55 of 55 checked");
+  check("runBatch passes a live-progress callback into the WoS pass (finished and stopped paths)",
+    popupJs37.indexOf("const wos = await fetchBatchWoSCategories((p) => {") !== -1
+    && popupJs37.indexOf("const wosStopped = await fetchBatchWoSCategories((p) => {") !== -1
+    && popupJs37.indexOf('setBatchStatus(batchSummary + " " + DATA.wosProgressText(p.checked, p.total, p.hecFound));') !== -1);
+  check("fetchBatchWoSCategories reports progress after every checked row",
+    popupJs37.indexOf('if (typeof onProgress === "function") onProgress({ checked, total: totalToCheck, hecFound });') !== -1);
+
+  // (5) WoS button after the batch: only rows that still need
+  // a check keep it visible.
+  check("batchRowsNeedingWosCheck: a row with ISSNs, no category, never checked needs a re-check",
+    DATA.batchRowsNeedingWosCheck([{ issns: ["01782762"], rank: { source: "none" }, wosChecked: false }]) === 1);
+  check("batchRowsNeedingWosCheck: categorised, definitively not-indexed, and ISSN-less rows need none",
+    DATA.batchRowsNeedingWosCheck([
+      { issns: ["01782762"], rank: { source: "none", wosCategory: "W" }, wosChecked: true },
+      { issns: ["01782762"], rank: { source: "none" }, wosChecked: true },
+      { issns: [], rank: { source: "none" }, wosChecked: false },
+    ]) === 0);
+  check("runBatch decides the WoS button from the rows after the auto pass (finished and stopped)",
+    popupJs37.indexOf("updateBatchMjlButton();") !== -1
+    && popupJs37.indexOf("const need = DATA.batchRowsNeedingWosCheck(batchResults);") !== -1);
+  check("manual WoS button re-decides its own visibility after a re-check",
+    popupJs37.indexOf("updateBatchMjlButton();\n      saveBatchLiveState(false);") !== -1);
+
+  // (4) Full-tab batch progress: the batch owner publishes a
+  // small live state; any other page renders it on open and
+  // on change.
+  const live37 = DATA.buildBatchLiveState({ status: "12 of 65 articles done", sjrTag: "SJR 2017 saved, 41,551 rows", progressPct: 18, resultsHidden: true, downloadHidden: true, mjlHidden: true, stopHidden: false, resumeHidden: true, progressHidden: false, finished: false, updatedAt: new Date().toISOString() });
+  check("buildBatchLiveState round-trips status, SJR tag, progress, and every button state",
+    live37.status === "12 of 65 articles done" && live37.sjrTag === "SJR 2017 saved, 41,551 rows" && live37.progressPct === 18
+    && live37.downloadHidden === true && live37.stopHidden === false && live37.finished === false && !!live37.updatedAt);
+  check("batchLiveStateIsFresh: fresh now, stale after 25 hours",
+    DATA.batchLiveStateIsFresh(live37, Date.now()) === true
+    && DATA.batchLiveStateIsFresh(live37, Date.now() + 25 * 60 * 60 * 1000) === false);
+  check("runBatch owns the shared live state and publishes it as the batch runs",
+    popupJs37.indexOf("batchLiveOwner = true;") !== -1
+    && popupJs37.indexOf("function saveBatchLiveState(finished)") !== -1
+    && popupJs37.indexOf('chrome.storage.local.set({ batchLive: buildCurrentBatchLiveState(finished) }') !== -1);
+  check("a non-owner page follows the live state on change and renders it on open",
+    popupJs37.indexOf("chrome.storage.onChanged.addListener((changes, area) => {") !== -1
+    && popupJs37.indexOf("if (area !== \"local\" || !changes.batchLive || batchLiveOwner) return;") !== -1
+    && popupJs37.indexOf("restoreBatchLiveState();") !== -1);
+  check("full tab restores a finished batch's results so its Download button works",
+    popupJs37.indexOf('if (state.finished && Array.isArray(r.lastBatch) && r.lastBatch.length && !batchResults.length) {') !== -1
+    && popupJs37.indexOf("batchResults = r.lastBatch;") !== -1);
+  check("runBatch prefetches every distinct year in the file (at most 3 at once) instead of one year at a time",
+    popupJs37.indexOf("const batchYears = [...new Set(rows.map((r) => r.year).filter((y) => y && parseInt(y, 10) <= sjrLatestYear()))];") !== -1
+    && popupJs37.indexOf("for (let k = 0; k < 3; k++) prefetchNext();") !== -1);
+  check("runBatch sweeps leftover tabs at batch end (finished, stopped, and early-stop paths)",
+    (popupJs37.match(/sendSweepTabs\(\);/g) || []).length >= 3
+    && popupJs37.indexOf('sendBackgroundMessage({ type: "sweepTabs" }, 10000)') !== -1);
+
+  // (7) The 57/40 numbers, verified against the user's real
+  // batch output (tests/naqqash-results-20261127.csv, 65 rows)
+  // and the test set. This is the record of what the numbers
+  // mean — the fixture is the evidence.
+  const results37 = DATA.parseCsv(fs.readFileSync(path.join(DIR, "naqqash-results-20261127.csv"), "utf8"));
+  const header37 = results37[0];
+  const col37 = (name) => header37.indexOf(name);
+  const rows37 = results37.slice(1).filter((r) => r.length > 1);
+  const cell37 = (r, name) => r[col37(name)] || "";
+  const found37 = rows37.filter((r) => cell37(r, "Status / note").indexOf("Not found") === -1);
+  const notFound37 = rows37.filter((r) => cell37(r, "Status / note").indexOf("Not found") !== -1);
+  const noRank37 = found37.filter((r) => !cell37(r, "JCR quartile (year)").trim() && !cell37(r, "SJR quartile - fallback NOT JCR (year)").trim());
+  check("57/40 fixture: 65 rows, 57 found, 8 not found, 0 JCR, 39 SJR fallback, 18 found but no ranking data",
+    rows37.length === 65 && found37.length === 57 && notFound37.length === 8
+    && rows37.filter((r) => cell37(r, "JCR quartile (year)").trim()).length === 0
+    && rows37.filter((r) => cell37(r, "SJR quartile - fallback NOT JCR (year)").trim()).length === 39
+    && noRank37.length === 18,
+    "rows=" + rows37.length + " found=" + found37.length + " notFound=" + notFound37.length + " noRank=" + noRank37.length);
+  check("57/40 fixture: 38 WoS categories in the old run (the 3 SCIE misses), 2 duplicates flagged",
+    rows37.filter((r) => cell37(r, "WoS category").trim()).length === 38
+    && rows37.filter((r) => cell37(r, "Status / note").indexOf("Same article as row") !== -1).length === 2);
+  check("57/40 fixture: the 18 are 14 non-indexed journals + 2 book chapters + 2 with a WoS category but no quartile",
+    noRank37.filter((r) => cell37(r, "WoS category").trim()).length === 2
+    && noRank37.filter((r) => !cell37(r, "WoS category").trim()).length === 16
+    && noRank37.some((r) => cell37(r, "Journal").indexOf("Physiological and Molecular Plant Pathology") !== -1)
+    && noRank37.some((r) => cell37(r, "Journal").indexOf("Israeli Journal of Aquaculture") !== -1)
+    && noRank37.some((r) => cell37(r, "Journal").indexOf("Plant Ecophysiology and Adaptation") !== -1)
+    && noRank37.some((r) => cell37(r, "Journal").indexOf("Bio-organic Amendments") !== -1));
+  check("57/40 fixture: the 2 HEC Y journals (FUUAST, NUST) sit inside the 18, not among the ranked rows",
+    noRank37.some((r) => cell37(r, "Journal").indexOf("FUUAST Journal of Biology") !== -1)
+    && noRank37.some((r) => cell37(r, "Journal").indexOf("NUST Journal of Natural Sciences") !== -1));
+  const testSet37 = DATA.parseArticleListText(fs.readFileSync(path.join(DIR, "..", "test-set.csv"), "utf8"));
+  const scie37 = testSet37.rows.filter((r) => ["Saudi Journal of Biological Sciences", "Microorganisms", "Biology and Fertility of Soils"].indexOf(r.journal) !== -1);
+  check("57/40 fixture: the 3 SCIE journals are in the test set and all three missed WoS in the old run (SJR Q1/Q2/Q1, blank WoS)",
+    scie37.length === 3
+    && scie37.every((r) => rows37.some((x) => cell37(x, "Journal") === r.journal && cell37(x, "SJR quartile - fallback NOT JCR (year)").trim() && !cell37(x, "WoS category").trim())),
+    JSON.stringify(scie37.map((r) => r.journal)));
+  check("57/40 fix: the MJL tab path now tries the next ISSN after a stable not-indexed instead of returning (dual-ISSN root cause)",
+    bgJs37.indexOf("sawNotIndexed = true;") !== -1
+    && bgJs37.indexOf("if (sawNotIndexed) return { category: \"\", index: \"\", issn: list[list.length - 1], notIndexed: true };") !== -1);
+  check("57/40 fix: the MJL direct-fetch loop also continues to the next ISSN after a not-indexed",
+    bgJs37.indexOf("result = { category: \"\", index: \"\", issn, notIndexed: true };\n      continue;") !== -1);
+
+  // (7, live) MJL tries every ISSN: run the REAL
+  // fetchMjlCategoryViaTab from background.js against mocked
+  // chrome tabs, with a fake clock so the 8s stability wait
+  // costs no real time. Biology and Fertility of Soils is the
+  // case: print ISSN 0178-2762 says not-indexed, online ISSN
+  // 1432-0789 is SCIE/W — the old code returned after the
+  // first and never tried the second.
+  function extractFn37(src, marker) {
+    const start = src.indexOf(marker);
+    if (start === -1) return null;
+    let i = src.indexOf("{", start);
+    let depth = 0;
+    for (let j = i; j < src.length; j++) {
+      if (src[j] === "{") depth++;
+      else if (src[j] === "}") { depth--; if (depth === 0) return src.slice(start, j + 1); }
+    }
+    return null;
+  }
+  const savedGlobals37 = { chrome: global.chrome, FREE: global.FREE, DateNow: Date.now, fetch: global.fetch, document: global.document, window: global.window };
+  let fakeNow37 = 1000000;
+  const realDateNow37 = Date.now;
+  try {
+    Date.now = () => fakeNow37;
+    const storage37 = {};
+    const tabs37 = new Map();
+    const removedTabs37 = [];
+    let nextTabId37 = 1;
+    let mjlTextFor37 = (issn) => "Found 0 results";
+    global.chrome = {
+      tabs: {
+        create: async (opts) => {
+          const id = nextTabId37++;
+          tabs37.set(id, { id, url: opts.url, status: "complete" });
+          return { id };
+        },
+        get: async (id) => {
+          const t = tabs37.get(id);
+          if (!t) throw new Error("No tab with id: " + id);
+          return t;
+        },
+        remove: async (id) => { removedTabs37.push(id); tabs37.delete(id); },
+        onUpdated: { addListener: () => {}, removeListener: () => {} },
+      },
+      scripting: {
+        executeScript: async (call) => {
+          const tab = tabs37.get(call.target.tabId);
+          // The tab URL carries the hyphenated ISSN
+          // (mjlSearchUrl formats 14320789 as 1432-0789).
+          const issn = tab ? (String(tab.url || "").split("issn=")[1] || "").replace(/-/g, "") : "";
+          return [{ result: mjlTextFor37(issn) }];
+        },
+      },
+      storage: {
+        local: {
+          get: (key, cb) => { const v = {}; v[key] = storage37[key]; cb(v); },
+          set: (obj, cb) => { Object.assign(storage37, obj); if (cb) cb(); },
+        },
+      },
+    };
+    global.FREE = require("../freedata.js");
+    global.sleepMs = async (ms) => { fakeNow37 += ms; };
+    global.EXTENSION_TABS_KEY = "extensionTabs";
+    const evalFn37 = (src, marker) => {
+      const s = extractFn37(src, marker);
+      return s ? eval("(" + s + ")") : null;
+    };
+    global.extensionTabsGet = evalFn37(bgJs37, "function extensionTabsGet() {");
+    global.extensionTabsSet = evalFn37(bgJs37, "function extensionTabsSet(list) {");
+    global.registerExtensionTab = evalFn37(bgJs37, "async function registerExtensionTab(tabId, purpose) {");
+    global.unregisterExtensionTab = evalFn37(bgJs37, "async function unregisterExtensionTab(tabId) {");
+    global.closeExtensionTab = evalFn37(bgJs37, "async function closeExtensionTab(tabId) {");
+    global.waitForTabLoad = evalFn37(bgJs37, "async function waitForTabLoad(tabId, timeoutMs) {");
+    global.readTabText = evalFn37(bgJs37, "async function readTabText(tabId) {");
+    const fetchMjlViaTab37 = evalFn37(bgJs37, "async function fetchMjlCategoryViaTab(issns) {");
+    check("MJL mock: fetchMjlCategoryViaTab is extractable with its tab helpers",
+      !!fetchMjlViaTab37 && !!global.registerExtensionTab && !!global.closeExtensionTab && !!global.waitForTabLoad && !!global.readTabText);
+    if (fetchMjlViaTab37) {
+      // Case A: print ISSN misses, online ISSN is SCIE.
+      mjlTextFor37 = (issn) => (issn === "14320789"
+        ? "Found 1 result. Biology and Fertility of Soils. Web of Science Core Collection: Science Citation Index Expanded."
+        : "Found 0 results");
+      removedTabs37.length = 0;
+      const rA = await fetchMjlViaTab37(["01782762", "14320789"]);
+      check("MJL mock: print ISSN not-indexed, online ISSN resolves to SCIE/W (the dual-ISSN fix)",
+        rA.category === "W" && rA.index === "SCIE" && rA.issn === "14320789", JSON.stringify(rA));
+      check("MJL mock: both tabs closed after the check (no leak)",
+        removedTabs37.length === 2, "removed=" + JSON.stringify(removedTabs37));
+      check("MJL mock: tab registry is empty after the closes",
+        (await global.extensionTabsGet()).length === 0);
+      // Case B: both ISSNs miss — the answer is not-indexed,
+      // and both tabs still close.
+      mjlTextFor37 = () => "Found 0 results";
+      removedTabs37.length = 0;
+      const rB = await fetchMjlViaTab37(["01782762", "14320789"]);
+      check("MJL mock: both ISSNs not-indexed gives notIndexed, not an error",
+        rB.notIndexed === true && !rB.category, JSON.stringify(rB));
+      check("MJL mock: both tabs closed on the not-indexed path too",
+        removedTabs37.length === 2, "removed=" + JSON.stringify(removedTabs37));
+    }
+  } finally {
+    Date.now = realDateNow37;
+    global.chrome = savedGlobals37.chrome;
+    global.FREE = savedGlobals37.FREE;
+    global.fetch = savedGlobals37.fetch;
+    global.document = savedGlobals37.document;
+    global.window = savedGlobals37.window;
+    delete global.sleepMs;
+    delete global.EXTENSION_TABS_KEY;
+    delete global.extensionTabsGet;
+    delete global.extensionTabsSet;
+    delete global.registerExtensionTab;
+    delete global.unregisterExtensionTab;
+    delete global.closeExtensionTab;
+    delete global.waitForTabLoad;
+    delete global.readTabText;
+  }
+
+  // (1, live) Shared SJR tab + 4 MB chunks + parallel years:
+  // run the REAL getSjrSharedTab, sweepExtensionTabs, and
+  // fetchSjrCsvInTab against mocked chrome. The CSVs are
+  // synthetic ~11 MB files, so the slice count is real.
+  const savedGlobals37b = { chrome: global.chrome, FREE: global.FREE, fetch: global.fetch, document: global.document, window: global.window };
+  try {
+    const storage37b = { sjrClearance: { clearedAt: new Date().toISOString() } };
+    const tabs37b = new Map();
+    const removedTabs37b = [];
+    const createdUrls37b = [];
+    let nextTabId37b = 7;
+    let executeCalls37b = 0;
+    let storeCalls37b = 0;
+    let sliceCalls37b = 0;
+    const mockWindow37b = {};
+    const sjrRow37b = "1;123;Test Journal;journal;12345678;Test Pub;1,234;Q2;10;5\n";
+    const fakeCsv37b = (year) => "Rank;Sourceid;Title;Type;Issn;Publisher;SJR;SJR Best Quartile;H index;Total Docs. (" + year + ")\n" + sjrRow37b.repeat(180000);
+    const csv2021b = fakeCsv37b(2021);
+    const csv2020b = fakeCsv37b(2020);
+    global.chrome = {
+      tabs: {
+        create: async (opts) => {
+          const id = nextTabId37b++;
+          createdUrls37b.push(opts.url);
+          tabs37b.set(id, { id, url: opts.url, status: "complete" });
+          return { id };
+        },
+        get: async (id) => {
+          const t = tabs37b.get(id);
+          if (!t) throw new Error("No tab with id: " + id);
+          return t;
+        },
+        remove: async (id) => { removedTabs37b.push(id); tabs37b.delete(id); },
+        onUpdated: { addListener: () => {}, removeListener: () => {} },
+      },
+      scripting: {
+        executeScript: async (call) => {
+          executeCalls37b++;
+          const args = call.args || [];
+          if (args[2] === "store") {
+            storeCalls37b++;
+            global.window = mockWindow37b;
+            global.document = { baseURI: "https://www.scimagojr.com/journalrank.php?year=" + args[1], querySelectorAll: () => [{ getAttribute: () => "journalrank.php?out=xls", textContent: "Download" }] };
+            global.fetch = async (url) => ({ ok: true, status: 200, text: async () => (String(url).indexOf("year=2020") !== -1 ? csv2020b : csv2021b) });
+            const res = await global.__sjrInTabFetch37b(args[0], args[1], "store", args[3]);
+            return [{ result: res }];
+          }
+          sliceCalls37b++;
+          const key = "__sjrCsv_" + args[2];
+          return [{ result: (mockWindow37b[key] || "").slice(args[0], args[0] + args[1]) }];
+        },
+      },
+      storage: {
+        local: {
+          get: (key, cb) => { const v = {}; v[key] = storage37b[key]; cb(v); },
+          set: (obj, cb) => { Object.assign(storage37b, obj); if (cb) cb(); },
+        },
+      },
+    };
+    global.FREE = require("../freedata.js");
+    global.sleepMs = async () => {};
+    global.EXTENSION_TABS_KEY = "extensionTabs";
+    global.sjrSharedTabId = null;
+    global.sjrSharedTabCreating = null;
+    const evalFn37b = (src, marker) => {
+      const s = extractFn37(src, marker);
+      return s ? eval("(" + s + ")") : null;
+    };
+    global.extensionTabsGet = evalFn37b(bgJs37, "function extensionTabsGet() {");
+    global.extensionTabsSet = evalFn37b(bgJs37, "function extensionTabsSet(list) {");
+    global.registerExtensionTab = evalFn37b(bgJs37, "async function registerExtensionTab(tabId, purpose) {");
+    global.unregisterExtensionTab = evalFn37b(bgJs37, "async function unregisterExtensionTab(tabId) {");
+    global.closeExtensionTab = evalFn37b(bgJs37, "async function closeExtensionTab(tabId) {");
+    global.waitForTabLoad = async () => true;
+    global.pollSjrTabForClearance = async () => "cleared";
+    global.getSjrClearance = evalFn37b(bgJs37, "function getSjrClearance() {");
+    global.setSjrClearance = evalFn37b(bgJs37, "function setSjrClearance() {");
+    global.__sjrInTabFetch37b = evalFn37b(bgJs37, "async function sjrInTabFetch(urls, year, mode, budgetMs) {");
+    global.sjrInTabFetch = global.__sjrInTabFetch37b; // the single-return fallback calls it by this name
+    global.sjrTriedSummary = evalFn37b(bgJs37, "function sjrTriedSummary(tried) {");
+    global.fetchSjrCsvInTabSingle = evalFn37b(bgJs37, "async function fetchSjrCsvInTabSingle(tabId, year) {");
+    global.fetchSjrCsvInTab = evalFn37b(bgJs37, "async function fetchSjrCsvInTab(tabId, year) {");
+    const getShared37b = evalFn37b(bgJs37, "async function getSjrSharedTab(year) {");
+    const sweep37b = evalFn37b(bgJs37, "async function sweepExtensionTabs(keepTabId) {");
+    check("SJR mock: shared-tab getter, sweep, and chunked fetch are extractable",
+      !!getShared37b && !!sweep37b && !!global.fetchSjrCsvInTab && !!global.__sjrInTabFetch37b);
+    if (getShared37b && sweep37b && global.fetchSjrCsvInTab) {
+      // Clearance is fresh: ONE tab for two years, opened on
+      // the light home page, second call warm.
+      const t1 = await getShared37b(2021);
+      const t2 = await getShared37b(2020);
+      check("SJR mock: two years share ONE tab (1 create, not 2)",
+        createdUrls37b.length === 1 && t1.tabId === t2.tabId, "creates=" + createdUrls37b.length + " tabIds=" + t1.tabId + "/" + t2.tabId);
+      check("SJR mock: with fresh clearance the shared tab opens on the light home page, no ranking-page load",
+        createdUrls37b[0] === "https://www.scimagojr.com/" && t2.warm === true, "url=" + createdUrls37b[0] + " warm=" + t2.warm);
+      // Parallel years from the one tab: each year's CSV comes
+      // back whole, under its own per-year key.
+      const fetchStarted37b = Date.now();
+      const [csvA, csvB] = await Promise.all([
+        global.fetchSjrCsvInTab(t1.tabId, 2021),
+        global.fetchSjrCsvInTab(t1.tabId, 2020),
+      ]);
+      const fetchMs37b = Date.now() - fetchStarted37b;
+      check("SJR mock: parallel 2021 + 2020 fetches from one tab each return their own year's CSV (no clobber)",
+        csvA.text === csv2021b && csvB.text === csv2020b,
+        "2021 len=" + (csvA.text || "").length + " 2020 len=" + (csvB.text || "").length);
+      check("SJR mock: ~11 MB per year reads back in 4 MB slices (3 slices, not 22) — 8 executeScript calls for 2 years",
+        storeCalls37b === 2 && sliceCalls37b === 6 && executeCalls37b === 8,
+        "store=" + storeCalls37b + " slices=" + sliceCalls37b + " total=" + executeCalls37b);
+      console.log("  [timing] SJR mock fetch: 2 years x ~11 MB, " + executeCalls37b + " executeScript calls, " + fetchMs37b + " ms (mock, no network)");
+      // The sweep closes the shared tab and empties the registry.
+      const remaining37b = await sweep37b(null);
+      check("SJR mock: sweep closes the shared tab and empties the registry",
+        remaining37b === 0 && removedTabs37b.indexOf(t1.tabId) !== -1, "remaining=" + remaining37b + " removed=" + JSON.stringify(removedTabs37b));
+      // A tab the user navigated away from is NOT closed by the sweep.
+      const userTab = await global.chrome.tabs.create({ url: "https://example.com/", active: false });
+      await global.registerExtensionTab(userTab.id, "sjr");
+      const remaining2 = await sweep37b(null);
+      check("SJR mock: sweep leaves a registered tab the user navigated elsewhere alone",
+        remaining2 === 1 && removedTabs37b.indexOf(userTab.id) === -1, "remaining=" + remaining2);
+    }
+    // Store-phase timing (the cost the prefetch now overlaps):
+    // parse + store a synthetic 30k-row SJR file in Node.
+    const synthRows37b = [];
+    for (let i = 0; i < 30000; i++) synthRows37b.push((i + 1) + ";" + (1000 + i) + ";Synthetic Journal " + i + ";journal;" + String(10000000 + i) + ";Pub;1,5;Q3;20;100");
+    const synthText37b = "Rank;Sourceid;Title;Type;Issn;Publisher;SJR;SJR Best Quartile;H index;Total Docs. (2021)\n" + synthRows37b.join("\n") + "\n";
+    const parseStart37b = Date.now();
+    const parsed37b = DATA.parseSjrText(synthText37b, { fileName: "synthetic-2021.csv", year: 2021 });
+    const parseMs37b = Date.now() - parseStart37b;
+    const store37b = new DATA.MemoryStore();
+    const putStart37b = Date.now();
+    await store37b.putSjr(parsed37b.rows, { fileName: "synthetic-2021.csv", year: 2021, rows: parsed37b.rows.length, importedAt: new Date().toISOString(), expires: DATA.sjrExpiresAt(new Date().toISOString()) });
+    const putMs37b = Date.now() - putStart37b;
+    check("store-phase timing: 30,000-row synthetic SJR file parses and stores (the phase the prefetch overlaps)",
+      parsed37b.rows.length === 30000 && (await store37b.getRank([String(10000000)], 2021)).source === "SJR",
+      "parsed=" + parsed37b.rows.length);
+    console.log("  [timing] SJR store phase (Node): parse 30,000 rows " + parseMs37b + " ms, store " + putMs37b + " ms");
+  } finally {
+    global.chrome = savedGlobals37b.chrome;
+    global.FREE = savedGlobals37b.FREE;
+    global.fetch = savedGlobals37b.fetch;
+    global.document = savedGlobals37b.document;
+    global.window = savedGlobals37b.window;
+    delete global.sleepMs;
+    delete global.EXTENSION_TABS_KEY;
+    delete global.sjrSharedTabId;
+    delete global.sjrSharedTabCreating;
+    delete global.extensionTabsGet;
+    delete global.extensionTabsSet;
+    delete global.registerExtensionTab;
+    delete global.unregisterExtensionTab;
+    delete global.closeExtensionTab;
+    delete global.waitForTabLoad;
+    delete global.pollSjrTabForClearance;
+    delete global.getSjrClearance;
+    delete global.setSjrClearance;
+    delete global.__sjrInTabFetch37b;
+    delete global.sjrInTabFetch;
+    delete global.sjrTriedSummary;
+    delete global.fetchSjrCsvInTabSingle;
+    delete global.fetchSjrCsvInTab;
+  }
 
   console.log(`\n==== ${pass} passed, ${fail} failed ====`);
   if (failures.length) console.log("Failures:\n - " + failures.join("\n - "));

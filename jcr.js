@@ -1258,6 +1258,90 @@
     return meta.sjrFiles.some((f) => sjrFileYear(f) === year && !isExpired(f.importedAt, "sjr", fromDate));
   }
 
+  // ---------- Import status text: auto-saved data vs a list file (28 Nov 2026) ----------
+  // Files are appended in import order, so the last entry is the
+  // latest. (popup.js has its own latestFile; this is the pure
+  // twin for the status helpers.)
+  function latestMetaFile(files) {
+    if (!files || !files.length) return null;
+    return files[files.length - 1];
+  }
+
+  // The batch's automatic WoS/HEC pass saves rows straight into
+  // the store, so "No WoS list imported yet" was wrong after a
+  // batch even with 40 rows stored: no list FILE was imported,
+  // but the categories were saved automatically. These helpers
+  // say which one it was.
+  function mjlStatusText(meta) {
+    if (!meta || !meta.mjlRows) {
+      return "No WoS list imported yet. Categories are checked per article (free) when you run a lookup or a batch.";
+    }
+    const file = latestMetaFile(meta.mjlFiles);
+    const auto = !!file && file.fileName === "Master Journal List (automatic)";
+    let text = "WoS list: " + meta.mjlRows + " journals stored" + (auto ? " automatically (per-article checks)" : " from an imported list file") + ".";
+    if (file && file.importedAt) text += " " + validUntilText(file.importedAt, "mjl") + ".";
+    return text;
+  }
+
+  function hecStatusText(meta) {
+    if (!meta || !meta.hecRows) {
+      return "No HEC data saved yet. The HEC Y check runs automatically from DOAJ when you run a batch.";
+    }
+    const file = latestMetaFile(meta.hecFiles);
+    let text = "HEC data: " + meta.hecRows + " journals stored (DOAJ check, fallback only).";
+    if (file && file.importedAt) text += " " + validUntilText(file.importedAt, "hec") + ".";
+    return text;
+  }
+
+  // ---------- Batch live progress text (28 Nov 2026) ----------
+  // WoS/HEC pass progress, shown in the same status area as the
+  // batch summary while the pass runs.
+  function wosProgressText(checked, total, hecFound) {
+    let text = "Fetching WoS categories... " + checked + " of " + total + " checked";
+    if (hecFound) text += " (HEC Y: " + hecFound + " found)";
+    return text;
+  }
+
+  // Rows that still need a manual WoS re-check: they have ISSNs,
+  // no category yet, and were never definitively checked (a
+  // definitive answer is a category OR a stable not-indexed;
+  // errors and timeouts leave the row unchecked so a retry
+  // stays possible).
+  function batchRowsNeedingWosCheck(results) {
+    if (!results || !results.length) return 0;
+    return results.filter(function (r) {
+      return r.issns && r.issns.length && !(r.rank && r.rank.wosCategory) && !r.wosChecked;
+    }).length;
+  }
+
+  // ---------- Batch live state (28 Nov 2026) ----------
+  // The side panel and the full tab are two pages: batch progress
+  // used to live only in the panel page's memory, so the full tab
+  // opened fresh. The panel that runs the batch now writes this
+  // small state to chrome.storage.local as the batch runs, and
+  // any other page renders it on open and on change.
+  function buildBatchLiveState(fields) {
+    return {
+      status: fields.status || "",
+      sjrTag: fields.sjrTag || "",
+      progressPct: typeof fields.progressPct === "number" ? fields.progressPct : 0,
+      resultsHidden: !!fields.resultsHidden,
+      downloadHidden: !!fields.downloadHidden,
+      mjlHidden: !!fields.mjlHidden,
+      stopHidden: !!fields.stopHidden,
+      resumeHidden: !!fields.resumeHidden,
+      progressHidden: !!fields.progressHidden,
+      finished: !!fields.finished,
+      updatedAt: fields.updatedAt || new Date().toISOString(),
+    };
+  }
+
+  function batchLiveStateIsFresh(state, nowMs) {
+    if (!state || !state.updatedAt) return false;
+    const age = nowMs - new Date(state.updatedAt).getTime();
+    return age >= 0 && age < 24 * 60 * 60 * 1000;
+  }
+
   const api = {
     normaliseIssn: normaliseIssn, formatIssn: formatIssn,
     parseIssnList: parseIssnList,
@@ -1277,6 +1361,9 @@
     monthsLeft: monthsLeft, monthsLeftText: monthsLeftText,
     validUntilText: validUntilText, isExpired: isExpired,
     sjrFileYear: sjrFileYear, sjrFilesCoverYear: sjrFilesCoverYear,
+    mjlStatusText: mjlStatusText, hecStatusText: hecStatusText,
+    wosProgressText: wosProgressText, batchRowsNeedingWosCheck: batchRowsNeedingWosCheck,
+    buildBatchLiveState: buildBatchLiveState, batchLiveStateIsFresh: batchLiveStateIsFresh,
   };
 
   if (typeof module !== "undefined" && module.exports) {
